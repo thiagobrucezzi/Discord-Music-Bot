@@ -87,14 +87,30 @@ shoukaku.on('ready', (name) => {
 
 shoukaku.on('error', (name, error) => {
     console.error(`❌ Lavalink ${name}: Error -`, error);
+    // Don't crash on Lavalink errors, just log them
 });
 
 shoukaku.on('close', (name, code, reason) => {
     console.warn(`⚠️ Lavalink ${name}: Closed - Code: ${code}, Reason: ${reason || 'No reason'}`);
+    // Attempt to reconnect automatically
 });
 
 shoukaku.on('disconnect', (name, players, moved) => {
     console.warn(`⚠️ Lavalink ${name}: Disconnected - Players: ${players.length}, Moved: ${moved}`);
+    // Clean up disconnected players
+    if (players && players.length > 0) {
+        players.forEach(player => {
+            try {
+                if (player && !moved) {
+                    player.destroy().catch(err => {
+                        console.error(`Error destroying player ${player.guildId}:`, err);
+                    });
+                }
+            } catch (err) {
+                console.error('Error handling disconnected player:', err);
+            }
+        });
+    }
 });
 
 // Kazagumo events
@@ -104,41 +120,105 @@ kazagumo.shoukaku.on('debug', (name, info) => {
 
 // Handle when a track ends - automatically play next song in queue
 kazagumo.on('playerEnd', async (player) => {
-    const guild = client.guilds.cache.get(player.guildId);
-    if (!guild) return;
+    try {
+        const guild = client.guilds.cache.get(player.guildId);
+        if (!guild) {
+            // Guild not found, destroy player
+            try {
+                await player.destroy();
+            } catch (err) {
+                console.error('Error destroying player for missing guild:', err);
+            }
+            return;
+        }
 
-    // If there are more songs in the queue, play the next one
-    if (player.queue.size > 0) {
-        await player.play();
-        const nextTrack = player.queue.current;
-        if (nextTrack && player.textId) {
-            const channel = guild.channels.cache.get(player.textId);
-            if (channel) {
-                const embed = new EmbedBuilder()
-                    .setColor(0x5865F2)
-                    .setTitle('🎵 Now playing')
-                    .setDescription(`**[${nextTrack.title}](${nextTrack.uri})**`)
-                    .addFields(
-                        { name: '👤 Requested by', value: `${nextTrack.requester}`, inline: true },
-                        { name: '⏱️ Duration', value: nextTrack.length > 0 ? formatTime(nextTrack.length) : 'Live', inline: true }
-                    )
-                    .setThumbnail(nextTrack.thumbnail || null)
-                    .setTimestamp();
-                
-                try {
-                    await channel.send({ embeds: [embed] });
-                } catch (error) {
-                    console.error('Error sending next track notification:', error);
+        // If there are more songs in the queue, play the next one
+        if (player.queue.size > 0) {
+            try {
+                await player.play();
+                const nextTrack = player.queue.current;
+                if (nextTrack && player.textId) {
+                    const channel = guild.channels.cache.get(player.textId);
+                    if (channel) {
+                        const embed = new EmbedBuilder()
+                            .setColor(0x5865F2)
+                            .setTitle('🎵 Now playing')
+                            .setDescription(`**[${nextTrack.title}](${nextTrack.uri})**`)
+                            .addFields(
+                                { name: '👤 Requested by', value: `${nextTrack.requester}`, inline: true },
+                                { name: '⏱️ Duration', value: nextTrack.length > 0 ? formatTime(nextTrack.length) : 'Live', inline: true }
+                            )
+                            .setThumbnail(nextTrack.thumbnail || null)
+                            .setTimestamp();
+                        
+                        try {
+                            await channel.send({ embeds: [embed] });
+                        } catch (error) {
+                            console.error('Error sending next track notification:', error);
+                        }
+                    }
                 }
+            } catch (playError) {
+                console.error('Error playing next track:', playError);
+                // Try to continue with next track or destroy player if persistent error
+            }
+        } else {
+            // No more songs, disconnect after a delay
+            setTimeout(async () => {
+                try {
+                    const currentPlayer = kazagumo.players.get(player.guildId);
+                    if (currentPlayer && !currentPlayer.playing && currentPlayer.queue.size === 0) {
+                        await currentPlayer.destroy();
+                    }
+                } catch (err) {
+                    console.error('Error destroying inactive player:', err);
+                }
+            }, 3600000); // Disconnect after 1 hour of inactivity
+        }
+    } catch (error) {
+        console.error('Error in playerEnd handler:', error);
+    }
+});
+
+// Handle player errors
+kazagumo.on('playerException', async (player, error) => {
+    console.error(`Player error in guild ${player.guildId}:`, error);
+    // Don't destroy player on every error, just log it
+});
+
+// Handle player disconnect
+kazagumo.on('playerDestroy', (player) => {
+    console.log(`Player destroyed for guild ${player.guildId}`);
+});
+
+// Detect when bot is manually disconnected from voice channel
+client.on('voiceStateUpdate', (oldState, newState) => {
+    // Only care about the bot's own voice state
+    if (newState.member?.id !== client.user?.id) return;
+
+    const guildId = newState.guild.id;
+    const player = kazagumo.players.get(guildId);
+
+    // If bot was disconnected from voice channel (channel changed from something to null)
+    if (oldState.channelId && !newState.channelId && player) {
+        console.log(`⚠️ Bot was manually disconnected from voice channel in guild ${guildId}`);
+        // Destroy the player to clean up state, but check if it's already destroyed
+        try {
+            // Check if player is already destroyed by checking if it has required properties
+            if (player.voiceId && player.guildId) {
+                player.destroy().catch(err => {
+                    // Only log if it's not an "already destroyed" error
+                    if (!err.message?.includes('already destroyed') && err.code !== 1) {
+                        console.error(`Error destroying player after manual disconnect:`, err);
+                    }
+                });
+            }
+        } catch (err) {
+            // Player might already be destroyed, ignore
+            if (!err.message?.includes('already destroyed') && err.code !== 1) {
+                console.error(`Error checking player state:`, err);
             }
         }
-    } else {
-        // No more songs, disconnect after a delay
-        setTimeout(async () => {
-            if (player && !player.playing && player.queue.size === 0) {
-                await player.destroy();
-            }
-        }, 3600000); // Disconnect after 1 hour of inactivity
     }
 });
 
@@ -171,7 +251,10 @@ client.on('interactionCreate', async interaction => {
         await command.execute(interaction, kazagumo);
     } catch (error) {
         console.error('Error executing command:', error);
-        const reply = { content: '❌ There was an error executing this command!', ephemeral: true };
+        const reply = { 
+            content: '❌ There was an error executing this command!', 
+            flags: 64 // Ephemeral flag (MessageFlags.Ephemeral = 64)
+        };
         if (interaction.replied || interaction.deferred) {
             await interaction.followUp(reply);
         } else {
@@ -181,14 +264,23 @@ client.on('interactionCreate', async interaction => {
 });
 
 // Improved error handling for hosting
-process.on('unhandledRejection', error => {
+process.on('unhandledRejection', (error, promise) => {
     console.error('Unhandled promise rejection:', error);
+    // Log more details if available
+    if (error.stack) {
+        console.error('Stack trace:', error.stack);
+    }
     // Don't close the process in hosting, just log
+    // This prevents the bot from crashing on unhandled rejections
 });
 
-process.on('uncaughtException', error => {
+process.on('uncaughtException', (error) => {
     console.error('Uncaught exception:', error);
+    if (error.stack) {
+        console.error('Stack trace:', error.stack);
+    }
     // Don't close the process in hosting, just log
+    // This prevents the bot from crashing on uncaught exceptions
 });
 
 // Graceful shutdown handling (useful for hosting)
