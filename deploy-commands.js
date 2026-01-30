@@ -79,11 +79,26 @@ async function deployCommands() {
         if (guildId) {
             console.log(`🏠 Using SERVER commands (appear immediately)`);
             console.log(`   Server ID: ${guildId}`);
-            data = await rest.put(
-                Routes.applicationGuildCommands(clientId, guildId),
-                { body: commands }
-            );
-            console.log(`✅ Successfully registered ${data.length} slash commands on the server!`);
+            try {
+                data = await rest.put(
+                    Routes.applicationGuildCommands(clientId, guildId),
+                    { body: commands }
+                );
+                console.log(`✅ Successfully registered ${data.length} slash commands on the server!`);
+            } catch (guildError) {
+                // If server registration fails (e.g., Missing Access), fallback to global
+                if (guildError.code === 50001 || guildError.code === 50013) {
+                    console.warn(`⚠️  Server registration failed (Missing Access). Falling back to global commands...`);
+                    console.log(`🌍 Using GLOBAL commands (can take up to 1 hour to appear)`);
+                    data = await rest.put(
+                        Routes.applicationCommands(clientId),
+                        { body: commands }
+                    );
+                    console.log(`✅ Successfully registered ${data.length} slash commands globally!`);
+                } else {
+                    throw guildError; // Re-throw if it's a different error
+                }
+            }
         } else {
             console.log(`🌍 Using GLOBAL commands (can take up to 1 hour to appear)`);
             console.log(`💡 Tip: Add GUILD_ID to your .env for instant commands`);
@@ -112,5 +127,5 @@ async function deployCommands() {
     }
 }
 
-// Ejecutar
+// Execute
 deployCommands();
