@@ -128,6 +128,163 @@ kazagumo.shoukaku.on('debug', (name, info) => {
     }
 });
 
+// Helper function to search and play related songs for autoplay
+async function searchAndPlayRelatedSong(player, kazagumo, client, guild) {
+    // Use autoplay context if available, otherwise use current track
+    const contextTrack = player._autoplayContext || player.queue.current;
+    
+    if (!contextTrack) {
+        console.warn(`   └─ ⚠️ No context track available for autoplay`);
+        return false;
+    }
+    
+    // Initialize autoplay history if it doesn't exist
+    if (!player._autoplayHistory) {
+        player._autoplayHistory = [];
+    }
+    
+    console.log(`   └─ 🔄 Autoplay enabled, searching for related songs...`);
+    console.log(`   └─ Using context: ${contextTrack.title}`);
+    
+    try {
+        // Extract artist name from track title for better search
+        // Format is usually "Artist - Song" or "Artist | Song"
+        let searchQuery = contextTrack.title;
+        
+        // Try to extract artist name
+        const artistMatch = contextTrack.title.match(/^([^-|]+)/);
+        if (artistMatch) {
+            const artistName = artistMatch[1].trim();
+            // Use artist name for better music-focused results
+            searchQuery = artistName;
+            console.log(`   └─ Extracted artist: ${artistName}`);
+        } else {
+            // Fallback to radio mode
+            searchQuery = `radio ${contextTrack.title}`;
+        }
+        
+        console.log(`   └─ Searching: ${searchQuery}`);
+        
+        const result = await kazagumo.search(searchQuery, {
+            requester: client.user
+        });
+
+        if (result.tracks && result.tracks.length > 0) {
+            // Filter out tracks that are duplicates, in history, or not music-related
+            const relatedTracks = result.tracks.filter(track => {
+                // Exclude if same URI
+                if (track.uri === contextTrack.uri || 
+                    (player.queue.current && track.uri === player.queue.current.uri)) {
+                    return false;
+                }
+                
+                // Exclude if same title (case insensitive)
+                const trackTitleLower = track.title.toLowerCase();
+                const contextTitleLower = contextTrack.title.toLowerCase();
+                if (trackTitleLower === contextTitleLower) {
+                    return false;
+                }
+                
+                // Exclude non-music content (tutorials, guides, radio streams, etc.)
+                const nonMusicKeywords = [
+                    'how to', 'tutorial', 'guide', 'tips', 'tricks',
+                    'radio concierto', 'emisión en directo', 'live radio',
+                    'internet radio', 'licensing', 'keyfob', 'volvo',
+                    'things you didn\'t know', 'cassette - radio'
+                ];
+                const isNonMusic = nonMusicKeywords.some(keyword => 
+                    trackTitleLower.includes(keyword)
+                );
+                if (isNonMusic) {
+                    return false;
+                }
+                
+                // Exclude if in history (check URI and similar titles)
+                const inHistory = player._autoplayHistory.some(historyTrack => {
+                    if (historyTrack.uri === track.uri) return true;
+                    // Check if titles are very similar (same artist/session)
+                    const historyTitleLower = historyTrack.title.toLowerCase();
+                    // If titles share significant words, consider them duplicates
+                    const trackWords = trackTitleLower.split(/\s+/).filter(w => w.length > 3);
+                    const historyWords = historyTitleLower.split(/\s+/).filter(w => w.length > 3);
+                    const commonWords = trackWords.filter(w => historyWords.includes(w));
+                    // If more than 2 significant words match, likely same song
+                    if (commonWords.length >= 2) return true;
+                    return false;
+                });
+                
+                return !inHistory;
+            });
+
+            if (relatedTracks.length > 0) {
+                // Take the first related track
+                const relatedTrack = relatedTracks[0];
+                console.log(`   └─ ✅ Found related song: ${relatedTrack.title}`);
+                
+                // Add to history (keep last 10 songs)
+                player._autoplayHistory.push(relatedTrack);
+                if (player._autoplayHistory.length > 10) {
+                    player._autoplayHistory.shift(); // Remove oldest
+                }
+                
+                // Update autoplay context to the new track
+                player._autoplayContext = relatedTrack;
+                
+                // Check if queue is empty before adding
+                const wasQueueEmpty = player.queue.length === 0;
+                
+                // Add to queue
+                await player.queue.add(relatedTrack);
+                
+                // If queue was empty, we need to advance to the new track
+                if (wasQueueEmpty && player.queue.current) {
+                    await player.skip();
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                }
+                
+                // Play the track
+                if (!player.playing) {
+                    await player.play();
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                }
+                
+                // Send notification
+                if (player.textId) {
+                    const channel = guild.channels.cache.get(player.textId);
+                    if (channel) {
+                        const embed = new EmbedBuilder()
+                            .setColor(0x5865F2)
+                            .setTitle('🔄 Autoplay')
+                            .setDescription(`**Playing related song:**\n[${relatedTrack.title}](${relatedTrack.uri})`)
+                            .addFields(
+                                { name: '⏱️ Duration', value: relatedTrack.length > 0 ? formatTime(relatedTrack.length) : 'Live', inline: true }
+                            )
+                            .setThumbnail(relatedTrack.thumbnail || null)
+                            .setTimestamp();
+                        
+                        try {
+                            await channel.send({ embeds: [embed] });
+                            console.log(`   └─ ✅ Autoplay: Playing ${relatedTrack.title}`);
+                        } catch (error) {
+                            console.error('Error sending autoplay notification:', error);
+                        }
+                    }
+                }
+                return true;
+            } else {
+                console.warn(`   └─ ⚠️ No different related songs found`);
+                return false;
+            }
+        } else {
+            console.warn(`   └─ ⚠️ No related songs found`);
+            return false;
+        }
+    } catch (autoplayError) {
+        console.error('Error in autoplay search:', autoplayError);
+        return false;
+    }
+}
+
 // Handle when a track ends - automatically play next song in queue
 kazagumo.on('playerEnd', async (player) => {
     try {
@@ -142,11 +299,72 @@ kazagumo.on('playerEnd', async (player) => {
             return;
         }
 
+        // Check if a manual skip was performed - if so, skip processing
+        // This prevents double skip when skip command already handled it
+        if (player._manualSkip && player._manualSkipTime) {
+            const timeSinceSkip = Date.now() - player._manualSkipTime;
+            // Only ignore if skip happened recently (within last 3 seconds)
+            if (timeSinceSkip < 3000) {
+                console.log(`   └─ Manual skip in progress, skipping playerEnd processing`);
+                // Don't return yet - wait a bit and check if track actually changed
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Check if track changed - if so, clear flag and let it play
+                const currentTrack = player.queue.current;
+                const expectedTrack = player._manualSkipNextTrack;
+                if (currentTrack && expectedTrack && 
+                    (currentTrack.uri === expectedTrack.uri || currentTrack.title === expectedTrack.title)) {
+                    // Track is correct, clear flag and let it continue
+                    player._manualSkip = false;
+                    player._manualSkipNextTrack = null;
+                    player._manualSkipTime = null;
+                    console.log(`   └─ Track changed correctly, clearing skip flag`);
+                    return; // Don't process further - track is already playing
+                }
+                // If track didn't change, continue with normal processing
+                player._manualSkip = false;
+                player._manualSkipNextTrack = null;
+                player._manualSkipTime = null;
+            }
+        }
+
         // If there are more songs in the queue, play the next one
         const queueLength = player.queue.length;
         const currentTrackBefore = player.queue.current;
         
         console.log(`🎵 Track ended | Guild: ${player.guildId} | Queue length: ${queueLength} | Current track: ${currentTrackBefore?.title} | Playing: ${player.playing}`);
+        
+        // Check if autoplay was handled by skip command
+        // If skip just added a related song, we should let that song play
+        // and only process autoplay again when that related song ends
+        if (player._autoplayHandledBySkip) {
+            const skipTrack = player._autoplaySkipTrack;
+            const relatedTrack = player._autoplayRelatedTrack;
+            
+            // If the current track is the one that was skipped (the original track)
+            // Skip already handled autoplay, so don't process again
+            if (skipTrack && currentTrackBefore && 
+                (currentTrackBefore.uri === skipTrack.uri || currentTrackBefore.title === skipTrack.title)) {
+                console.log(`   └─ Skipped track ended, autoplay already handled by skip, skipping playerEnd processing`);
+                // Don't clear the flag yet - wait until the related song ends
+                return;
+            }
+            
+            // If there are songs in queue and we have a related track from skip
+            // Check if the next track is the one that skip added
+            if (queueLength > 0 && relatedTrack) {
+                const nextTracks = player.queue.slice(0, 1);
+                const nextTrackInQueue = nextTracks[0];
+                
+                // If the next track is the related one that skip added, don't process autoplay
+                if (nextTrackInQueue && 
+                    (nextTrackInQueue.uri === relatedTrack.uri || nextTrackInQueue.title === relatedTrack.title)) {
+                    console.log(`   └─ Autoplay handled by skip, related song in queue, skipping autoplay processing`);
+                    // Continue with normal queue processing, but don't process autoplay
+                    // The flag will be cleared when the related song ends
+                }
+            }
+        }
         
         if (queueLength > 0) {
             try {
@@ -161,26 +379,14 @@ kazagumo.on('playerEnd', async (player) => {
                     return;
                 }
                 
-                // Check if a manual skip was already performed
-                // This prevents double-skip when skip command was used
-                if (player._manualSkip && player._manualSkipNextTrack) {
-                    const manualNextTrack = player._manualSkipNextTrack;
-                    const currentTrack = player.queue.current;
-                    
-                    // If we're already on the track that was manually skipped to, don't process
-                    if (currentTrack && (currentTrack === manualNextTrack || currentTrack.title === manualNextTrack.title)) {
-                        // Clear the flag and skip processing
-                        player._manualSkip = false;
-                        player._manualSkipNextTrack = null;
+                // Check if the next track is already playing (might have been manually skipped)
+                const currentPlayingTrack = player.queue.current;
+                if (currentPlayingTrack && nextTrackInQueue && player.playing) {
+                    if (currentPlayingTrack.uri === nextTrackInQueue.uri || 
+                        currentPlayingTrack.title === nextTrackInQueue.title) {
+                        console.log(`   └─ Next track already playing, skipping playerEnd processing`);
                         return;
                     }
-                }
-                
-                // Check if the next track is already playing (might have been manually skipped)
-                // If current track is already the next one and it's playing, don't do anything
-                if (player.queue.current === nextTrackInQueue && player.playing) {
-                    console.log(`   └─ Next track already playing, skipping playerEnd processing`);
-                    return;
                 }
                 
                 // Skip to advance the queue - this should move nextTrackInQueue to current
@@ -272,17 +478,59 @@ kazagumo.on('playerEnd', async (player) => {
                 // Try to continue with next track or destroy player if persistent error
             }
         } else {
-            // No more songs, disconnect after a delay
-            setTimeout(async () => {
-                try {
-                    const currentPlayer = kazagumo.players.get(player.guildId);
-                    if (currentPlayer && !currentPlayer.playing && currentPlayer.queue.size === 0) {
-                        await currentPlayer.destroy();
+            // No more songs in queue
+            // Check if autoplay is enabled
+            if (player._autoplay) {
+                // If autoplay was handled by skip, check if we should clear the flag
+                // The flag should be cleared when the related song (added by skip) ends
+                if (player._autoplayHandledBySkip) {
+                    const relatedTrack = player._autoplayRelatedTrack;
+                    // If current track is the related song that skip added, clear the flag
+                    // This means the related song just ended, so we can process autoplay normally now
+                    if (currentTrackBefore && relatedTrack && 
+                        (currentTrackBefore.uri === relatedTrack.uri || 
+                         currentTrackBefore.title === relatedTrack.title)) {
+                        console.log(`   └─ Related song from skip ended, clearing flag and processing autoplay`);
+                        player._autoplayHandledBySkip = false;
+                        player._autoplaySkipTrack = null;
+                        player._autoplayRelatedTrack = null;
+                    } else {
+                        // Still on the skipped track or flag mismatch, don't process autoplay
+                        console.log(`   └─ Autoplay handled by skip, waiting for related song to end`);
+                        return;
                     }
-                } catch (err) {
-                    console.error('Error destroying inactive player:', err);
                 }
-            }, 3600000); // Disconnect after 1 hour of inactivity
+                
+                // Process autoplay normally
+                const success = await searchAndPlayRelatedSong(player, kazagumo, client, guild);
+                if (!success) {
+                    // Disable autoplay if no more related songs
+                    player._autoplay = false;
+                    // Disconnect after a delay if no more music
+                    setTimeout(async () => {
+                        try {
+                            const currentPlayer = kazagumo.players.get(player.guildId);
+                            if (currentPlayer && !currentPlayer.playing && currentPlayer.queue.size === 0) {
+                                await currentPlayer.destroy();
+                            }
+                        } catch (err) {
+                            console.error('Error destroying inactive player:', err);
+                        }
+                    }, 3600000); // Disconnect after 1 hour of inactivity
+                }
+            } else {
+                // Autoplay disabled or no current track, disconnect after a delay
+                setTimeout(async () => {
+                    try {
+                        const currentPlayer = kazagumo.players.get(player.guildId);
+                        if (currentPlayer && !currentPlayer.playing && currentPlayer.queue.size === 0) {
+                            await currentPlayer.destroy();
+                        }
+                    } catch (err) {
+                        console.error('Error destroying inactive player:', err);
+                    }
+                }, 3600000); // Disconnect after 1 hour of inactivity
+            }
         }
     } catch (error) {
         console.error('Error in playerEnd handler:', error);

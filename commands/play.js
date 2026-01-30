@@ -108,6 +108,13 @@ export default {
             
             await player.queue.add(track);
             
+            // Update autoplay context when a song is manually added
+            // This ensures autoplay uses the latest manually added song as context
+            if (player._autoplay) {
+                player._autoplayContext = track;
+                console.log(`   └─ 🔄 Updated autoplay context to: ${track.title}`);
+            }
+            
             const queueLengthAfter = player.queue.length;
             console.log(`   └─ ✅ Added to queue | Queue now: ${queueLengthAfter} tracks`);
 

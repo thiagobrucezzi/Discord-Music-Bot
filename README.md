@@ -125,10 +125,10 @@ This will install all necessary dependencies.
 # Discord bot token (REQUIRED)
 DISCORD_TOKEN=your_token_here
 
-# Bot Application ID (REQUIRED)
+# Bot Application ID (OPTIONAL - obtained automatically if not provided)
 DISCORD_CLIENT_ID=your_application_id
 
-# Server ID for instant commands (OPTIONAL but recommended)
+# Server ID for instant commands (OPTIONAL - if not provided, commands will be registered globally)
 GUILD_ID=your_server_id
 
 # Lavalink configuration (REQUIRED - see next step)
@@ -139,10 +139,10 @@ LAVALINK_SECURE=false
 
 ### 5.2 Fill in the Values
 
-- **`DISCORD_TOKEN`:** The token you copied in Step 2.3
-- **`DISCORD_CLIENT_ID`:** The Application ID you copied in Step 2.4
-- **`GUILD_ID`:** The Server ID you copied in Step 3.3 (optional, but recommended)
-- **`LAVALINK_URL` and `LAVALINK_PASSWORD`:** You'll configure these in the next step
+- **`DISCORD_TOKEN`:** The token you copied in Step 2.3 (REQUIRED)
+- **`DISCORD_CLIENT_ID`:** The Application ID you copied in Step 2.4 (OPTIONAL - the script can obtain it automatically from your token)
+- **`GUILD_ID`:** The Server ID you copied in Step 3.3 (OPTIONAL - if not provided, commands will be registered globally and may take up to 1 hour to appear)
+- **`LAVALINK_URL` and `LAVALINK_PASSWORD`:** You'll configure these in the next step (REQUIRED)
 
 ---
 
@@ -234,9 +234,11 @@ Register the slash commands on Discord:
 npm run deploy
 ```
 
-**Note:** 
+**Important Notes:** 
+- You can run this command **locally** (before hosting) or **from Wispbyte console** (after hosting)
 - If you specified `GUILD_ID` in `.env`, commands will appear **immediately** (1-2 minutes)
 - If not, global commands can take **up to 1 hour** to appear
+- The script will automatically fallback to global registration if server registration fails (e.g., missing permissions)
 
 ### 7.3 Start the Bot
 
@@ -279,8 +281,11 @@ Once you've tested that everything works locally, you can host it on [Wispbyte](
 
 Make sure you have:
 - ✅ Bot working locally
-- ✅ Commands registered (`npm run deploy` executed)
 - ✅ Wispbyte account
+
+**Note:** You can register commands either:
+- **Before hosting:** Run `npm run deploy` locally
+- **After hosting:** Run `npm run deploy` from Wispbyte's console/terminal
 
 ### 8.2 Upload Project to Wispbyte
 
@@ -364,8 +369,11 @@ DISCORD_TOKEN=your_token_here
 LAVALINK_URL=lavalinkv4.serenetia.com:443
 LAVALINK_PASSWORD=your_password
 LAVALINK_SECURE=true
+# Optional - Client ID is obtained automatically if not provided
 DISCORD_CLIENT_ID=your_application_id
-GUILD_ID=your_server_id (optional)
+
+# Optional - If not provided, commands will be registered globally
+GUILD_ID=your_server_id
 ```
 
 2. **Upload the `.env` along with other files** to Wispbyte
@@ -411,7 +419,34 @@ Wispbyte should install automatically with `npm install`, but if not:
 1. Go to Wispbyte console/terminal
 2. Run: `npm install`
 
-### 8.6 Start the Bot
+### 8.6 Register Commands (If Not Done Locally)
+
+**You can register commands in two ways:**
+
+#### Option A: From Wispbyte Console (After Hosting) ✅
+
+1. Go to Wispbyte panel
+2. Open the **Console/Terminal** section
+3. Run:
+   ```bash
+   npm run deploy
+   ```
+
+**This is especially useful if:**
+- You didn't register commands locally
+- You need to update commands after making changes
+- You want to switch between server-specific and global commands
+
+#### Option B: From Local Machine (Before Hosting)
+
+Run `npm run deploy` locally before uploading to Wispbyte (see Step 7.2).
+
+**Note:** Both methods work the same way. The script will automatically:
+- Try to register on the server if `GUILD_ID` is provided
+- Fallback to global registration if server registration fails
+- Use the Client ID from `.env` or obtain it automatically from your token
+
+### 8.7 Start the Bot
 
 1. In the Wispbyte panel, click **Start**
 2. Check the logs to verify everything is okay
@@ -421,7 +456,7 @@ Wispbyte should install automatically with `npm install`, but if not:
    ✅ Lavalink lavalink: Connected!
    ```
 
-### 8.7 Verification
+### 8.8 Verification
 
 #### Expected Logs
 
@@ -486,6 +521,7 @@ If everything is okay, you should see in the logs:
 | `/resume` | Resumes playback |
 | `/queue` | Shows the playback queue |
 | `/volume <0-200>` | Adjusts volume (0-200%) |
+| `/autoplay <on/off>` | Enables or disables automatic playback of related songs |
 
 ## 📖 Usage Guide
 
@@ -530,7 +566,8 @@ Bot-Music-Discord/
 │   ├── pause.js
 │   ├── resume.js
 │   ├── queue.js
-│   └── volume.js
+│   ├── volume.js
+│   └── autoplay.js
 ├── index.js          # Main bot file
 ├── deploy-commands.js # Script to register commands
 ├── setup.js          # Initial verification script
