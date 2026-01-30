@@ -57,8 +57,9 @@ const kazagumo = new Kazagumo(
         moveOnDisconnect: false,
         resumable: false,
         resumableTimeout: 30,
-        reconnectTries: 2,
-        restTimeout: 10000
+        reconnectTries: 5, // Increase reconnection tries
+        reconnectInterval: 5000, // Wait 5 seconds between reconnection attempts
+        restTimeout: 15000 // Increase timeout to 15 seconds for slow servers
     }
 );
 
@@ -115,7 +116,16 @@ shoukaku.on('disconnect', (name, players, moved) => {
 
 // Kazagumo events
 kazagumo.shoukaku.on('debug', (name, info) => {
-    console.log(`[DEBUG] ${name}:`, info);
+    // Only log important debug messages to avoid spam
+    if (typeof info === 'string' && (
+        info.includes('Connection') || 
+        info.includes('Player') || 
+        info.includes('Error') ||
+        info.includes('404') ||
+        info.includes('disconnect')
+    )) {
+        console.log(`[DEBUG] ${name}:`, info);
+    }
 });
 
 // Handle when a track ends - automatically play next song in queue
@@ -133,33 +143,132 @@ kazagumo.on('playerEnd', async (player) => {
         }
 
         // If there are more songs in the queue, play the next one
-        if (player.queue.size > 0) {
+        const queueLength = player.queue.length;
+        const currentTrackBefore = player.queue.current;
+        
+        console.log(`🎵 Track ended | Guild: ${player.guildId} | Queue length: ${queueLength} | Current track: ${currentTrackBefore?.title} | Playing: ${player.playing}`);
+        
+        if (queueLength > 0) {
             try {
-                await player.play();
-                const nextTrack = player.queue.current;
-                if (nextTrack && player.textId) {
-                    const channel = guild.channels.cache.get(player.textId);
-                    if (channel) {
-                        const embed = new EmbedBuilder()
-                            .setColor(0x5865F2)
-                            .setTitle('🎵 Now playing')
-                            .setDescription(`**[${nextTrack.title}](${nextTrack.uri})**`)
-                            .addFields(
-                                { name: '👤 Requested by', value: `${nextTrack.requester}`, inline: true },
-                                { name: '⏱️ Duration', value: nextTrack.length > 0 ? formatTime(nextTrack.length) : 'Live', inline: true }
-                            )
-                            .setThumbnail(nextTrack.thumbnail || null)
-                            .setTimestamp();
-                        
-                        try {
-                            await channel.send({ embeds: [embed] });
-                        } catch (error) {
-                            console.error('Error sending next track notification:', error);
+                // Get the next track from the queue using slice (like queue.js does)
+                const nextTracks = player.queue.slice(0, 1);
+                const nextTrackInQueue = nextTracks[0];
+                
+                console.log(`   └─ Next track in queue: ${nextTrackInQueue?.title}`);
+                
+                if (!nextTrackInQueue) {
+                    console.warn(`   └─ ⚠️ No next track found in queue!`);
+                    return;
+                }
+                
+                // Check if a manual skip was already performed
+                // This prevents double-skip when skip command was used
+                if (player._manualSkip && player._manualSkipNextTrack) {
+                    const manualNextTrack = player._manualSkipNextTrack;
+                    const currentTrack = player.queue.current;
+                    
+                    // If we're already on the track that was manually skipped to, don't process
+                    if (currentTrack && (currentTrack === manualNextTrack || currentTrack.title === manualNextTrack.title)) {
+                        // Clear the flag and skip processing
+                        player._manualSkip = false;
+                        player._manualSkipNextTrack = null;
+                        return;
+                    }
+                }
+                
+                // Check if the next track is already playing (might have been manually skipped)
+                // If current track is already the next one and it's playing, don't do anything
+                if (player.queue.current === nextTrackInQueue && player.playing) {
+                    console.log(`   └─ Next track already playing, skipping playerEnd processing`);
+                    return;
+                }
+                
+                // Skip to advance the queue - this should move nextTrackInQueue to current
+                console.log(`   └─ Calling skip() to advance queue...`);
+                await player.skip();
+                
+                // Wait for queue to update
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Verify the current track changed
+                const currentTrackAfter = player.queue.current;
+                const queueLengthAfter = player.queue.length;
+                
+                console.log(`   └─ After skip() | Current: ${currentTrackAfter?.title} | Queue length: ${queueLengthAfter}`);
+                
+                // Check if we need to play
+                if (!player.playing) {
+                    console.log(`   └─ Not playing, calling play()...`);
+                    await player.play();
+                    
+                    // Wait and verify
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    const isPlaying = player.playing;
+                    const finalTrack = player.queue.current;
+                    
+                    console.log(`   └─ After play() | Playing: ${isPlaying} | Current: ${finalTrack?.title}`);
+                    
+                    // Send notification if track changed and is playing
+                    if (finalTrack && finalTrack !== currentTrackBefore && isPlaying && player.textId) {
+                        const channel = guild.channels.cache.get(player.textId);
+                        if (channel) {
+                            const embed = new EmbedBuilder()
+                                .setColor(0x5865F2)
+                                .setTitle('🎵 Now playing')
+                                .setDescription(`**[${finalTrack.title}](${finalTrack.uri})**`)
+                                .addFields(
+                                    { name: '👤 Requested by', value: `${finalTrack.requester}`, inline: true },
+                                    { name: '⏱️ Duration', value: finalTrack.length > 0 ? formatTime(finalTrack.length) : 'Live', inline: true }
+                                )
+                                .setThumbnail(finalTrack.thumbnail || null)
+                                .setTimestamp();
+                            
+                            try {
+                                await channel.send({ embeds: [embed] });
+                                console.log(`   └─ ✅ Sent notification for: ${finalTrack.title}`);
+                            } catch (error) {
+                                console.error('Error sending next track notification:', error);
+                            }
+                        }
+                    } else if (finalTrack === currentTrackBefore) {
+                        console.warn(`   └─ ⚠️ Track didn't advance, still on: ${currentTrackBefore?.title}`);
+                    } else if (!isPlaying) {
+                        console.warn(`   └─ ⚠️ Track changed but not playing! Current: ${finalTrack?.title}`);
+                    }
+                } else {
+                    // Already playing, just send notification
+                    const finalTrack = player.queue.current;
+                    if (finalTrack && finalTrack !== currentTrackBefore && player.textId) {
+                        const channel = guild.channels.cache.get(player.textId);
+                        if (channel) {
+                            const embed = new EmbedBuilder()
+                                .setColor(0x5865F2)
+                                .setTitle('🎵 Now playing')
+                                .setDescription(`**[${finalTrack.title}](${finalTrack.uri})**`)
+                                .addFields(
+                                    { name: '👤 Requested by', value: `${finalTrack.requester}`, inline: true },
+                                    { name: '⏱️ Duration', value: finalTrack.length > 0 ? formatTime(finalTrack.length) : 'Live', inline: true }
+                                )
+                                .setThumbnail(finalTrack.thumbnail || null)
+                                .setTimestamp();
+                            
+                            try {
+                                await channel.send({ embeds: [embed] });
+                                console.log(`   └─ ✅ Sent notification for: ${finalTrack.title}`);
+                            } catch (error) {
+                                console.error('Error sending next track notification:', error);
+                            }
                         }
                     }
                 }
             } catch (playError) {
                 console.error('Error playing next track:', playError);
+                if (playError.message) {
+                    console.error(`   └─ Error message: ${playError.message}`);
+                }
+                if (playError.status) {
+                    console.error(`   └─ Error status: ${playError.status}`);
+                }
                 // Try to continue with next track or destroy player if persistent error
             }
         } else {
@@ -183,7 +292,22 @@ kazagumo.on('playerEnd', async (player) => {
 // Handle player errors
 kazagumo.on('playerException', async (player, error) => {
     console.error(`Player error in guild ${player.guildId}:`, error);
+    // Log more details about the error
+    if (error.message) {
+        console.error(`Error message: ${error.message}`);
+    }
+    const status = error.status || error.response?.status;
+    if (status) {
+        console.error(`Error status: ${status}`);
+    }
+    
     // Don't destroy player on every error, just log it
+    // Server errors (5xx) indicate Lavalink issues, not player issues
+    if (status >= 500 && status < 600) {
+        console.error(`⚠️ Lavalink server error ${status} for guild ${player.guildId}. Server may be having issues.`);
+    } else if (status === 404 || error.message?.includes('404')) {
+        console.warn(`404 error detected, player may need to reconnect for guild ${player.guildId}`);
+    }
 });
 
 // Handle player disconnect
@@ -192,7 +316,7 @@ kazagumo.on('playerDestroy', (player) => {
 });
 
 // Detect when bot is manually disconnected from voice channel
-client.on('voiceStateUpdate', (oldState, newState) => {
+client.on('voiceStateUpdate', async (oldState, newState) => {
     // Only care about the bot's own voice state
     if (newState.member?.id !== client.user?.id) return;
 
@@ -202,11 +326,28 @@ client.on('voiceStateUpdate', (oldState, newState) => {
     // If bot was disconnected from voice channel (channel changed from something to null)
     if (oldState.channelId && !newState.channelId && player) {
         console.log(`⚠️ Bot was manually disconnected from voice channel in guild ${guildId}`);
-        // Destroy the player to clean up state, but check if it's already destroyed
+        // Add a longer delay to avoid race conditions during initial connection
+        // During initial connection, Discord may temporarily disconnect/reconnect
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Re-check player still exists after delay
+        const currentPlayer = kazagumo.players.get(guildId);
+        if (!currentPlayer) return; // Player already destroyed
+        
+        // Verify bot is still not in a channel
+        const guild = newState.guild;
+        const botMember = guild.members.cache.get(client.user.id);
+        if (botMember?.voice?.channel) {
+            console.log(`Bot reconnected to channel ${botMember.voice.channel.id}, not destroying player`);
+            return;
+        }
+        
+        // Only destroy if we're sure the bot is not in any channel
+        // This prevents destroying the player during initial connection phase
         try {
             // Check if player is already destroyed by checking if it has required properties
-            if (player.voiceId && player.guildId) {
-                player.destroy().catch(err => {
+            if (currentPlayer.voiceId && currentPlayer.guildId) {
+                await currentPlayer.destroy().catch(err => {
                     // Only log if it's not an "already destroyed" error
                     if (!err.message?.includes('already destroyed') && err.code !== 1) {
                         console.error(`Error destroying player after manual disconnect:`, err);

@@ -52,14 +52,13 @@ export default {
             volume = interaction.options.getInteger('volumen');
         }
         
-        // Log for debugging
-        console.log('Volume command received:', {
-            level: interaction.options.getInteger('level'),
-            volume: interaction.options.getInteger('volume'),
-            volumen: interaction.options.getInteger('volumen'),
-            finalVolume: volume,
-            allOptions: interaction.options.data
-        });
+        // Log for debugging - clean format
+        const levelValue = interaction.options.getInteger('level');
+        const volumeValue = interaction.options.getInteger('volume');
+        const volumenValue = interaction.options.getInteger('volumen');
+        
+        console.log(`🔊 Volume command | Guild: ${interaction.guild.id} | User: ${interaction.user.tag}`);
+        console.log(`   └─ Level: ${levelValue ?? 'null'} | Volume: ${volumeValue ?? 'null'} | Volumen: ${volumenValue ?? 'null'} | Final: ${volume}%`);
         
         // Validate volume value
         if (volume === null || volume === undefined) {
@@ -85,6 +84,9 @@ export default {
             // Use Kazagumo's setVolume method
             // This should work correctly with the converted value
             await player.setVolume(kazagumoVolume);
+            
+            // Log successful volume change
+            console.log(`✅ Volume set to ${volume}% (Kazagumo: ${kazagumoVolume}%) | Guild: ${interaction.guild.id}`);
 
             // Ensure volume is a valid number for display
             const displayVolume = volume !== null && volume !== undefined ? volume : 'unknown';
