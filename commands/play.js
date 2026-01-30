@@ -18,6 +18,8 @@ export default {
         const member = interaction.member;
         const voiceChannel = member.voice.channel;
 
+        console.log(`🎵 Play command | Guild: ${interaction.guild.id} | User: ${interaction.user.tag} | Query: ${query}`);
+
         if (!voiceChannel) {
             return interaction.editReply('❌ You must be in a voice channel to use this command!');
         }
@@ -86,16 +88,28 @@ export default {
             }
 
             // Search for the track
+            console.log(`   └─ Searching for: ${query}`);
             const result = await kazagumo.search(query, {
                 requester: interaction.user
             });
 
             if (!result.tracks.length) {
+                console.log(`   └─ ❌ No results found`);
                 return interaction.editReply('❌ No results found for your search!');
             }
 
             const track = result.tracks[0];
+            const queueLengthBefore = player.queue.length;
+            const isCurrentlyPlaying = player.playing || player.paused;
+            const currentTrack = player.queue.current;
+            
+            console.log(`   └─ Found: ${track.title}`);
+            console.log(`   └─ Queue before: ${queueLengthBefore} tracks | Currently playing: ${isCurrentlyPlaying ? currentTrack?.title : 'Nothing'}`);
+            
             await player.queue.add(track);
+            
+            const queueLengthAfter = player.queue.length;
+            console.log(`   └─ ✅ Added to queue | Queue now: ${queueLengthAfter} tracks`);
 
             const embed = new EmbedBuilder()
                 .setColor(0x5865F2)
@@ -110,12 +124,16 @@ export default {
 
             if (!player.playing && !player.paused) {
                 try {
+                    console.log(`   └─ Starting playback: ${track.title}`);
                     await player.play();
                     embed.setDescription(`🎵 **Now playing:** [${track.title}](${track.uri})`);
+                    console.log(`   └─ ✅ Now playing: ${track.title}`);
                 } catch (playError) {
-                    console.error('Error starting playback:', playError);
+                    console.error(`   └─ ❌ Error starting playback:`, playError);
                     // Don't fail the command if play fails, just show the track was added
                 }
+            } else {
+                console.log(`   └─ Track added to queue (${queueLengthAfter} total). Currently playing: ${currentTrack?.title}`);
             }
 
             await interaction.editReply({ embeds: [embed] });
