@@ -21,28 +21,71 @@ const client = new Client({
     ]
 });
 
-// Lavalink nodes configuration
+// Helper: fetch available Lavalink v4 SSL nodes from public API
+async function fetchLavalinkNodes(maxNodes = 10) {
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const response = await fetch('https://lavalink-list.ajieblogs.eu.org/SSL', {
+            signal: controller.signal
+        });
+        clearTimeout(timeout);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const list = await response.json();
+        const v4Nodes = list
+            .filter(n => n.version === 'v4' && !n.host.includes('-v3.') && !n.host.startsWith('lavalink-v3'))
+            .slice(0, maxNodes)
+            .map(n => ({
+                name: n.identifier,
+                url: `${n.host}:${n.port}`,
+                auth: n.password,
+                secure: Boolean(n.secure)
+            }));
+        console.log(`📡 API returned ${v4Nodes.length} v4 SSL nodes`);
+        return v4Nodes;
+    } catch (error) {
+        console.warn(`⚠️ Could not fetch nodes from API: ${error.message}`);
+        return [];
+    }
+}
+
+// Primary node from .env
 const lavalinkUrl = process.env.LAVALINK_URL || 'localhost:2333';
 const lavalinkPort = parseInt(lavalinkUrl.split(':')[1]) || 2333;
-// If port is 443 or specified as secure, use secure connection
 const isSecure = process.env.LAVALINK_SECURE === 'true' || lavalinkPort === 443;
 
-const nodes = [
-    {
-        name: 'lavalink',
-        url: lavalinkUrl,
-        auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
-        secure: isSecure
-    }
+const primaryNode = {
+    name: 'primary',
+    url: lavalinkUrl,
+    auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
+    secure: isSecure
+};
+
+// Hardcoded fallback nodes (v4, SSL) — used if API is unreachable
+const fallbackNodes = [
+    { name: 'serenetia-v4',    url: 'lavalinkv4.serenetia.com:443',      auth: 'https://seretia.link/discord', secure: true },
+    { name: 'jirayu-v4',       url: 'lavalink.jirayu.net:443',           auth: 'youshallnotpass',              secure: true },
+    { name: 'triniumhost-v4',  url: 'lavalink-v4.triniumhost.com:443',   auth: 'free',                         secure: true },
 ];
 
-console.log(`🔗 Lavalink Configuration: ${lavalinkUrl} (secure: ${isSecure})`);
+console.log(`🔍 Fetching Lavalink nodes from public API...`);
+const apiNodes = await fetchLavalinkNodes(); // try all available v4 SSL nodes
+
+// Merge: primary → API nodes → hardcoded fallbacks; deduplicate by URL
+const seenUrls = new Set();
+const nodes = [primaryNode, ...apiNodes, ...fallbackNodes].filter(n => {
+    if (seenUrls.has(n.url)) return false;
+    seenUrls.add(n.url);
+    return true;
+});
+
+console.log(`🎵 Lavalink nodes ready (${nodes.length} total):`);
+nodes.forEach((n, i) => console.log(`   ${i + 1}. ${n.url}  [${n.name}]`));
 
 // Create Discord.js connector
 const connector = new Connectors.DiscordJS(client);
 
-// Initialize Kazagumo
-// Kazagumo creates Shoukaku internally, we only need to pass the connector
+// Initialize Kazagumo with multi-node support
 const kazagumo = new Kazagumo(
     {
         defaultSearchEngine: 'youtube',
@@ -51,15 +94,15 @@ const kazagumo = new Kazagumo(
             if (guild) guild.shard.send(payload);
         }
     },
-    connector,  // Second parameter: the connector
-    nodes,     // Third parameter: Lavalink nodes
-    {          // Fourth parameter: Shoukaku options
-        moveOnDisconnect: false,
+    connector,
+    nodes,
+    {
+        moveOnDisconnect: true,   // auto-move players to another node if one dies
         resumable: false,
         resumableTimeout: 30,
-        reconnectTries: 5, // Increase reconnection tries
-        reconnectInterval: 5000, // Wait 5 seconds between reconnection attempts
-        restTimeout: 15000 // Increase timeout to 15 seconds for slow servers
+        reconnectTries: 3,
+        reconnectInterval: 5000,
+        restTimeout: 15000
     }
 );
 
@@ -116,13 +159,16 @@ shoukaku.on('disconnect', (name, players, moved) => {
 
 // Kazagumo events
 kazagumo.shoukaku.on('debug', (name, info) => {
-    // Only log important debug messages to avoid spam
     if (typeof info === 'string' && (
-        info.includes('Connection') || 
-        info.includes('Player') || 
+        info.includes('Connection') ||
+        info.includes('Player') ||
         info.includes('Error') ||
         info.includes('404') ||
-        info.includes('disconnect')
+        info.includes('disconnect') ||
+        info.includes('Voice') ||   // show all voice-related debug
+        info.includes('Session') ||
+        info.includes('Server Update') ||
+        info.includes('State Update')
     )) {
         console.log(`[DEBUG] ${name}:`, info);
     }
@@ -285,257 +331,71 @@ async function searchAndPlayRelatedSong(player, kazagumo, client, guild) {
     }
 }
 
-// Handle when a track ends - automatically play next song in queue
+// Handle when a track ends
+// NOTE: Kazagumo automatically advances the queue and calls play() internally after
+// this event fires. We must NOT call player.skip() or player.play() here for queue
+// advancement — that would stop the track Kazagumo just started.
 kazagumo.on('playerEnd', async (player) => {
     try {
         const guild = client.guilds.cache.get(player.guildId);
         if (!guild) {
-            // Guild not found, destroy player
-            try {
-                await player.destroy();
-            } catch (err) {
-                console.error('Error destroying player for missing guild:', err);
-            }
+            try { await player.destroy(); } catch (e) {}
             return;
         }
 
-        // Check if a manual skip was performed - if so, skip processing
-        // This prevents double skip when skip command already handled it
-        if (player._manualSkip && player._manualSkipTime) {
-            const timeSinceSkip = Date.now() - player._manualSkipTime;
-            // Only ignore if skip happened recently (within last 3 seconds)
-            if (timeSinceSkip < 3000) {
-                console.log(`   └─ Manual skip in progress, skipping playerEnd processing`);
-                // Don't return yet - wait a bit and check if track actually changed
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-                // Check if track changed - if so, clear flag and let it play
-                const currentTrack = player.queue.current;
-                const expectedTrack = player._manualSkipNextTrack;
-                if (currentTrack && expectedTrack && 
-                    (currentTrack.uri === expectedTrack.uri || currentTrack.title === expectedTrack.title)) {
-                    // Track is correct, clear flag and let it continue
-                    player._manualSkip = false;
-                    player._manualSkipNextTrack = null;
-                    player._manualSkipTime = null;
-                    console.log(`   └─ Track changed correctly, clearing skip flag`);
-                    return; // Don't process further - track is already playing
-                }
-                // If track didn't change, continue with normal processing
-                player._manualSkip = false;
-                player._manualSkipNextTrack = null;
-                player._manualSkipTime = null;
-            }
-        }
-
-        // If there are more songs in the queue, play the next one
         const queueLength = player.queue.length;
-        const currentTrackBefore = player.queue.current;
-        
-        console.log(`🎵 Track ended | Guild: ${player.guildId} | Queue length: ${queueLength} | Current track: ${currentTrackBefore?.title} | Playing: ${player.playing}`);
-        
-        // Check if autoplay was handled by skip command
-        // If skip just added a related song, we should let that song play
-        // and only process autoplay again when that related song ends
-        if (player._autoplayHandledBySkip) {
-            const skipTrack = player._autoplaySkipTrack;
-            const relatedTrack = player._autoplayRelatedTrack;
-            
-            // If the current track is the one that was skipped (the original track)
-            // Skip already handled autoplay, so don't process again
-            if (skipTrack && currentTrackBefore && 
-                (currentTrackBefore.uri === skipTrack.uri || currentTrackBefore.title === skipTrack.title)) {
-                console.log(`   └─ Skipped track ended, autoplay already handled by skip, skipping playerEnd processing`);
-                // Don't clear the flag yet - wait until the related song ends
-                return;
-            }
-            
-            // If there are songs in queue and we have a related track from skip
-            // Check if the next track is the one that skip added
-            if (queueLength > 0 && relatedTrack) {
-                const nextTracks = player.queue.slice(0, 1);
-                const nextTrackInQueue = nextTracks[0];
-                
-                // If the next track is the related one that skip added, don't process autoplay
-                if (nextTrackInQueue && 
-                    (nextTrackInQueue.uri === relatedTrack.uri || nextTrackInQueue.title === relatedTrack.title)) {
-                    console.log(`   └─ Autoplay handled by skip, related song in queue, skipping autoplay processing`);
-                    // Continue with normal queue processing, but don't process autoplay
-                    // The flag will be cleared when the related song ends
-                }
-            }
-        }
-        
+        const endedTrack = player.queue.current;
+
+        console.log(`🎵 Track ended | Guild: ${player.guildId} | Queue remaining: ${queueLength} | Was: ${endedTrack?.title}`);
+
         if (queueLength > 0) {
-            try {
-                // Get the next track from the queue using slice (like queue.js does)
-                const nextTracks = player.queue.slice(0, 1);
-                const nextTrackInQueue = nextTracks[0];
-                
-                console.log(`   └─ Next track in queue: ${nextTrackInQueue?.title}`);
-                
-                if (!nextTrackInQueue) {
-                    console.warn(`   └─ ⚠️ No next track found in queue!`);
-                    return;
+            // Kazagumo already plays the next track automatically.
+            // Wait briefly for it to advance, then send a "now playing" notification.
+            await new Promise(resolve => setTimeout(resolve, 400));
+            const nextTrack = player.queue.current;
+            if (nextTrack && player.textId) {
+                const channel = guild.channels.cache.get(player.textId);
+                if (channel) {
+                    const embed = new EmbedBuilder()
+                        .setColor(0x5865F2)
+                        .setTitle('🎵 Now playing')
+                        .setDescription(`**[${nextTrack.title}](${nextTrack.uri})**`)
+                        .addFields(
+                            { name: '👤 Requested by', value: `${nextTrack.requester}`, inline: true },
+                            { name: '⏱️ Duration', value: nextTrack.length > 0 ? formatTime(nextTrack.length) : 'Live', inline: true }
+                        )
+                        .setThumbnail(nextTrack.thumbnail || null)
+                        .setTimestamp();
+                    await channel.send({ embeds: [embed] }).catch(err => console.error('Error sending now playing:', err));
                 }
-                
-                // Check if the next track is already playing (might have been manually skipped)
-                const currentPlayingTrack = player.queue.current;
-                if (currentPlayingTrack && nextTrackInQueue && player.playing) {
-                    if (currentPlayingTrack.uri === nextTrackInQueue.uri || 
-                        currentPlayingTrack.title === nextTrackInQueue.title) {
-                        console.log(`   └─ Next track already playing, skipping playerEnd processing`);
-                        return;
-                    }
-                }
-                
-                // Skip to advance the queue - this should move nextTrackInQueue to current
-                console.log(`   └─ Calling skip() to advance queue...`);
-                await player.skip();
-                
-                // Wait for queue to update
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-                // Verify the current track changed
-                const currentTrackAfter = player.queue.current;
-                const queueLengthAfter = player.queue.length;
-                
-                console.log(`   └─ After skip() | Current: ${currentTrackAfter?.title} | Queue length: ${queueLengthAfter}`);
-                
-                // Check if we need to play
-                if (!player.playing) {
-                    console.log(`   └─ Not playing, calling play()...`);
-                    await player.play();
-                    
-                    // Wait and verify
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    const isPlaying = player.playing;
-                    const finalTrack = player.queue.current;
-                    
-                    console.log(`   └─ After play() | Playing: ${isPlaying} | Current: ${finalTrack?.title}`);
-                    
-                    // Send notification if track changed and is playing
-                    if (finalTrack && finalTrack !== currentTrackBefore && isPlaying && player.textId) {
-                        const channel = guild.channels.cache.get(player.textId);
-                        if (channel) {
-                            const embed = new EmbedBuilder()
-                                .setColor(0x5865F2)
-                                .setTitle('🎵 Now playing')
-                                .setDescription(`**[${finalTrack.title}](${finalTrack.uri})**`)
-                                .addFields(
-                                    { name: '👤 Requested by', value: `${finalTrack.requester}`, inline: true },
-                                    { name: '⏱️ Duration', value: finalTrack.length > 0 ? formatTime(finalTrack.length) : 'Live', inline: true }
-                                )
-                                .setThumbnail(finalTrack.thumbnail || null)
-                                .setTimestamp();
-                            
-                            try {
-                                await channel.send({ embeds: [embed] });
-                                console.log(`   └─ ✅ Sent notification for: ${finalTrack.title}`);
-                            } catch (error) {
-                                console.error('Error sending next track notification:', error);
-                            }
-                        }
-                    } else if (finalTrack === currentTrackBefore) {
-                        console.warn(`   └─ ⚠️ Track didn't advance, still on: ${currentTrackBefore?.title}`);
-                    } else if (!isPlaying) {
-                        console.warn(`   └─ ⚠️ Track changed but not playing! Current: ${finalTrack?.title}`);
-                    }
-                } else {
-                    // Already playing, just send notification
-                    const finalTrack = player.queue.current;
-                    if (finalTrack && finalTrack !== currentTrackBefore && player.textId) {
-                        const channel = guild.channels.cache.get(player.textId);
-                        if (channel) {
-                            const embed = new EmbedBuilder()
-                                .setColor(0x5865F2)
-                                .setTitle('🎵 Now playing')
-                                .setDescription(`**[${finalTrack.title}](${finalTrack.uri})**`)
-                                .addFields(
-                                    { name: '👤 Requested by', value: `${finalTrack.requester}`, inline: true },
-                                    { name: '⏱️ Duration', value: finalTrack.length > 0 ? formatTime(finalTrack.length) : 'Live', inline: true }
-                                )
-                                .setThumbnail(finalTrack.thumbnail || null)
-                                .setTimestamp();
-                            
-                            try {
-                                await channel.send({ embeds: [embed] });
-                                console.log(`   └─ ✅ Sent notification for: ${finalTrack.title}`);
-                            } catch (error) {
-                                console.error('Error sending next track notification:', error);
-                            }
-                        }
-                    }
-                }
-            } catch (playError) {
-                console.error('Error playing next track:', playError);
-                if (playError.message) {
-                    console.error(`   └─ Error message: ${playError.message}`);
-                }
-                if (playError.status) {
-                    console.error(`   └─ Error status: ${playError.status}`);
-                }
-                // Try to continue with next track or destroy player if persistent error
             }
         } else {
-            // No more songs in queue
-            // Check if autoplay is enabled
+            // Queue is empty — handle autoplay or schedule disconnect
             if (player._autoplay) {
-                // If autoplay was handled by skip, check if we should clear the flag
-                // The flag should be cleared when the related song (added by skip) ends
-                if (player._autoplayHandledBySkip) {
-                    const relatedTrack = player._autoplayRelatedTrack;
-                    // If current track is the related song that skip added, clear the flag
-                    // This means the related song just ended, so we can process autoplay normally now
-                    if (currentTrackBefore && relatedTrack && 
-                        (currentTrackBefore.uri === relatedTrack.uri || 
-                         currentTrackBefore.title === relatedTrack.title)) {
-                        console.log(`   └─ Related song from skip ended, clearing flag and processing autoplay`);
-                        player._autoplayHandledBySkip = false;
-                        player._autoplaySkipTrack = null;
-                        player._autoplayRelatedTrack = null;
-                    } else {
-                        // Still on the skipped track or flag mismatch, don't process autoplay
-                        console.log(`   └─ Autoplay handled by skip, waiting for related song to end`);
-                        return;
-                    }
-                }
-                
-                // Process autoplay normally
                 const success = await searchAndPlayRelatedSong(player, kazagumo, client, guild);
                 if (!success) {
-                    // Disable autoplay if no more related songs
                     player._autoplay = false;
-                    // Disconnect after a delay if no more music
-                    setTimeout(async () => {
-                        try {
-                            const currentPlayer = kazagumo.players.get(player.guildId);
-                            if (currentPlayer && !currentPlayer.playing && currentPlayer.queue.size === 0) {
-                                await currentPlayer.destroy();
-                            }
-                        } catch (err) {
-                            console.error('Error destroying inactive player:', err);
-                        }
-                    }, 3600000); // Disconnect after 1 hour of inactivity
+                    scheduleDisconnect(player, kazagumo);
                 }
             } else {
-                // Autoplay disabled or no current track, disconnect after a delay
-                setTimeout(async () => {
-                    try {
-                        const currentPlayer = kazagumo.players.get(player.guildId);
-                        if (currentPlayer && !currentPlayer.playing && currentPlayer.queue.size === 0) {
-                            await currentPlayer.destroy();
-                        }
-                    } catch (err) {
-                        console.error('Error destroying inactive player:', err);
-                    }
-                }, 3600000); // Disconnect after 1 hour of inactivity
+                scheduleDisconnect(player, kazagumo);
             }
         }
     } catch (error) {
         console.error('Error in playerEnd handler:', error);
     }
 });
+
+function scheduleDisconnect(player, kazagumo) {
+    setTimeout(async () => {
+        try {
+            const p = kazagumo.players.get(player.guildId);
+            if (p && !p.playing && p.queue.length === 0) await p.destroy();
+        } catch (err) {
+            console.error('Error destroying inactive player:', err);
+        }
+    }, 3600000); // 1 hour of inactivity
+}
 
 // Handle player errors
 kazagumo.on('playerException', async (player, error) => {

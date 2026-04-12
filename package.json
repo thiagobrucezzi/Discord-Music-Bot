@@ -23,8 +23,8 @@
   "dependencies": {
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
-    "kazagumo": "^3.4.0",
-    "shoukaku": "^4.2.0",
+    "kazagumo": "^3.4.3",
+    "shoukaku": "^4.3.0",
     "ws": "^8.19.0"
   }
 }

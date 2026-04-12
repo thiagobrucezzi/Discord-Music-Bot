@@ -27,3 +27,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Claude Code memory/session data
+.claude/
+
+# Old env file (without dot)
+env

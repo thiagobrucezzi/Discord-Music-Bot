@@ -5,11 +5,12 @@ Complete music bot for Discord using **Kazagumo**, **Shoukaku** and **Lavalink**
 ## ✨ Features
 
 - ✅ Music playback from YouTube
-- ✅ Queue system
+- ✅ Queue system with shuffle
 - ✅ Full playback control (play, pause, resume, stop, skip, queue)
-- ✅ Volume adjustment
+- ✅ Volume adjustment (0–100%)
 - ✅ Queue visualization
-- ✅ Lavalink integration
+- ✅ Autoplay — automatically plays related songs when the queue ends
+- ✅ **Multi-node Lavalink failover** — connects to multiple public nodes simultaneously; if one goes down, playback continues seamlessly
 - ✅ Modern slash commands
 
 ## 📋 Requirements
@@ -17,7 +18,7 @@ Complete music bot for Discord using **Kazagumo**, **Shoukaku** and **Lavalink**
 - **Node.js** 18.0.0 or higher
 - **npm** 7.0.0 or higher
 - A **Discord bot** created
-- A **Lavalink** server (free hosting or local)
+- A **Lavalink v4** server — the bot auto-discovers free public nodes, so no manual setup is needed
 
 ---
 
@@ -118,63 +119,66 @@ This will install all necessary dependencies.
 
 ### 5.1 Create the `.env` file
 
-1. Create a file called `.env` in the root of the project
-2. Copy and paste this content:
+Copy `.env.example` to `.env` and fill in your values:
+
+```bash
+cp .env.example .env
+```
 
 ```env
 # Discord bot token (REQUIRED)
 DISCORD_TOKEN=your_token_here
 
-# Bot Application ID (OPTIONAL - obtained automatically if not provided)
+# Bot Application ID (REQUIRED for deploying commands)
 DISCORD_CLIENT_ID=your_application_id
 
-# Server ID for instant commands (OPTIONAL - if not provided, commands will be registered globally)
-GUILD_ID=your_server_id
-
-# Lavalink configuration (REQUIRED - see next step)
-LAVALINK_URL=host:port
-LAVALINK_PASSWORD=your_password
-LAVALINK_SECURE=false
+# Primary Lavalink node (REQUIRED)
+# The bot auto-discovers additional public nodes for redundancy.
+LAVALINK_URL=lavalink-v4.triniumhost.com:443
+LAVALINK_PASSWORD=free
+LAVALINK_SECURE=true
 ```
 
 ### 5.2 Fill in the Values
 
 - **`DISCORD_TOKEN`:** The token you copied in Step 2.3 (REQUIRED)
-- **`DISCORD_CLIENT_ID`:** The Application ID you copied in Step 2.4 (OPTIONAL - the script can obtain it automatically from your token)
-- **`GUILD_ID`:** The Server ID you copied in Step 3.3 (OPTIONAL - if not provided, commands will be registered globally and may take up to 1 hour to appear)
-- **`LAVALINK_URL` and `LAVALINK_PASSWORD`:** You'll configure these in the next step (REQUIRED)
+- **`DISCORD_CLIENT_ID`:** The Application ID you copied in Step 2.4 (REQUIRED for `npm run deploy`)
+- **`LAVALINK_URL` / `LAVALINK_PASSWORD` / `LAVALINK_SECURE`:** Your primary Lavalink node. The bot will automatically connect to additional public nodes for redundancy — so even if the primary is down, music keeps playing.
 
 ---
 
 ## 🎵 Step 6: Configure Lavalink
 
-You need a Lavalink server for the bot to play music. You have 2 options:
+The bot uses **automatic multi-node failover** — it connects to multiple Lavalink v4 servers at startup. You only need to configure one primary node in `.env`; the rest are discovered automatically from a public API.
 
-### Option A: Free Hosting Service (Recommended) ⭐
+### Automatic Node Discovery
 
-1. **Go to:** https://lavalink.darrennathanael.com/
-2. **Register** and create a node
-3. **Copy the information:**
-   - **URL:** (e.g., `lavalinkv4.serenetia.com:443`)
-   - **Password:** (the password they gave you)
-4. **Update your `.env`:**
-   ```env
-   LAVALINK_URL=lavalinkv4.serenetia.com:443
-   LAVALINK_PASSWORD=your_password_here
-   LAVALINK_SECURE=true
-   ```
-   **Note:** If the port is `443`, always use `LAVALINK_SECURE=true`
+On every startup the bot:
+1. Fetches available Lavalink v4 SSL nodes from `lavalink-list.ajieblogs.eu.org`
+2. Connects to all discovered nodes simultaneously
+3. Uses the healthiest node for each request
+4. If a node goes down mid-playback, Shoukaku moves the player to another node automatically
 
-### Option B: Other Free Services
+You will see something like this in the logs:
 
-You can search for other free Lavalink hosting services:
-- Search on Discord: bot community servers
-- Search on Google: "free lavalink hosting"
-- Some services require registration or have limits
+```
+🔍 Fetching Lavalink nodes from public API...
+📡 API returned 4 v4 SSL nodes
+🎵 Lavalink nodes ready (5 total):
+   1. lavalink-v4.triniumhost.com:443  [primary]
+   2. lavalinkv4.serenetia.com:443  [lavalinkv4-serenetia-com-443]
+   ...
+✅ Lavalink primary: Connected!
+✅ Lavalink lavalinkv4-serenetia-com-443: Connected!
+```
 
-### Option C: Local Lavalink (Testing Only)
+### Using a Free Public Node (Default)
 
-If you want to test locally:
+The `.env.example` already contains a working free node (`lavalink-v4.triniumhost.com`). You can use it as-is, or swap it for any other public Lavalink v4 node.
+
+### Option: Local Lavalink (Advanced)
+
+If you want to run your own Lavalink server:
 
 1. **Download Lavalink:**
    - Go to: https://github.com/lavalink-devs/Lavalink/releases
@@ -185,7 +189,7 @@ If you want to test locally:
    server:
      port: 2333
      address: 0.0.0.0
-   
+
    lavalink:
      server:
        password: "youshallnotpass"
@@ -199,7 +203,7 @@ If you want to test locally:
    java -jar Lavalink.jar
    ```
 
-4. **Configure `.env`:**
+4. **Update `.env`:**
    ```env
    LAVALINK_URL=localhost:2333
    LAVALINK_PASSWORD=youshallnotpass
@@ -257,10 +261,15 @@ npm run dev
 You should see in the console:
 
 ```
-🔗 Lavalink Configuration: host:port (secure: true/false)
+🔍 Fetching Lavalink nodes from public API...
+📡 API returned X v4 SSL nodes
+🎵 Lavalink nodes ready (X total):
+   1. lavalink-v4.triniumhost.com:443  [primary]
+   ...
 🤖 Bot connected as YourBot#1234!
 📊 Servers: X
-✅ Lavalink lavalink: Connected!
+✅ Lavalink primary: Connected!
+✅ Client fully ready!
 ```
 
 ### 7.5 Test on Discord
@@ -463,10 +472,15 @@ Run `npm run deploy` locally before uploading to Wispbyte (see Step 7.2).
 If everything is okay, you should see in the logs:
 
 ```
-🔗 Lavalink Configuration: lavalinkv4.serenetia.com:443 (secure: true)
+🔍 Fetching Lavalink nodes from public API...
+📡 API returned X v4 SSL nodes
+🎵 Lavalink nodes ready (X total):
+   1. lavalink-v4.triniumhost.com:443  [primary]
+   ...
 🤖 Bot connected as YourBot#1234!
 📊 Servers: X
-✅ Lavalink lavalink: Connected!
+✅ Lavalink primary: Connected!
+✅ Client fully ready!
 ```
 
 #### If there are Errors
@@ -514,14 +528,15 @@ If everything is okay, you should see in the logs:
 
 | Command | Description |
 |---------|-------------|
-| `/play <song>` | Plays a song or adds to queue |
-| `/stop` | Stops playback and clears queue |
-| `/skip` | Skips to next song |
+| `/play <song>` | Plays a song or adds it to the queue (name or URL) |
+| `/skip` | Skips to the next song |
 | `/pause` | Pauses playback |
 | `/resume` | Resumes playback |
-| `/queue` | Shows the playback queue |
-| `/volume <0-200>` | Adjusts volume (0-200%) |
-| `/autoplay <on/off>` | Enables or disables automatic playback of related songs |
+| `/stop` | Stops playback and clears the queue |
+| `/queue` | Shows the current playback queue |
+| `/shuffle` | Shuffles the songs in the queue |
+| `/volume <0-100>` | Adjusts volume (0–100%) |
+| `/autoplay <on/off>` | Automatically plays related songs when the queue ends |
 
 ## 📖 Usage Guide
 
@@ -537,7 +552,8 @@ If everything is okay, you should see in the logs:
 /play never gonna give you up
 /play https://www.youtube.com/watch?v=dQw4w9WgXcQ
 /play bohemian rhapsody
-/volume volume: 50
+/volume level: 50
+/shuffle
 /queue
 /skip
 ```
@@ -558,22 +574,24 @@ If everything is okay, you should see in the logs:
 ## 📁 Project Structure
 
 ```
-Bot-Music-Discord/
+Discord-Music-Bot/
 ├── commands/          # Bot slash commands
 │   ├── play.js
-│   ├── stop.js
 │   ├── skip.js
 │   ├── pause.js
 │   ├── resume.js
+│   ├── stop.js
 │   ├── queue.js
+│   ├── shuffle.js
 │   ├── volume.js
 │   └── autoplay.js
-├── index.js          # Main bot file
-├── deploy-commands.js # Script to register commands
-├── setup.js          # Initial verification script
-├── package.json      # Dependencies and scripts
-├── .env              # Environment variables (create manually)
-└── README.md         # This documentation
+├── index.js           # Main bot file (multi-node Lavalink + event handlers)
+├── deploy-commands.js # Script to register slash commands on Discord
+├── setup.js           # Initial configuration verification script
+├── package.json       # Dependencies and scripts
+├── .env.example       # Environment variables template
+├── .env               # Your config (create from .env.example, never commit)
+└── README.md          # This documentation
 ```
 
 ---
@@ -588,10 +606,10 @@ Bot-Music-Discord/
 
 ### Doesn't connect to Lavalink
 
-- ✅ Verify that `LAVALINK_URL` and `LAVALINK_PASSWORD` are correct
-- ✅ If using port 443, make sure you have `LAVALINK_SECURE=true`
-- ✅ Verify that the Lavalink server is active
-- ✅ Try with another Lavalink server
+- ✅ Verify that `LAVALINK_URL` and `LAVALINK_PASSWORD` are correct in `.env`
+- ✅ If using port 443, make sure `LAVALINK_SECURE=true`
+- ✅ The bot auto-connects to multiple public nodes — if the primary is down, others will be used automatically
+- ✅ Check the startup logs: you should see multiple "✅ Lavalink X: Connected!" lines
 
 ### Commands don't appear
 

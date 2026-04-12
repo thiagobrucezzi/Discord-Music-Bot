@@ -70,20 +70,72 @@ export default {
 
             // Create new player if it doesn't exist or was destroyed
             if (!player) {
-                try {
-                    player = await kazagumo.createPlayer({
-                        guildId: interaction.guild.id,
-                        voiceId: voiceChannel.id,
-                        textId: interaction.channel.id,
-                        deaf: true
-                    });
-                } catch (createError) {
-                    console.error('Error creating player:', createError);
-                    // If player creation fails, try to get existing player again
-                    player = kazagumo.players.get(interaction.guild.id);
-                    if (!player) {
-                        return interaction.editReply('❌ Could not connect to voice channel. Please try again!');
+                const maxRetries = 3;
+                const triedNodes = new Set();
+
+                for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                    try {
+                        const playerOptions = {
+                            guildId: interaction.guild.id,
+                            voiceId: voiceChannel.id,
+                            textId: interaction.channel.id,
+                            deaf: true
+                        };
+
+                        // On retries, pick a connected node we haven't tried yet
+                        if (attempt > 1) {
+                            const altNode = [...kazagumo.shoukaku.nodes.values()]
+                                .find(n => n.state === 1 && !triedNodes.has(n.name));
+                            if (!altNode) {
+                                console.warn(`   └─ No more nodes to retry`);
+                                return interaction.editReply('❌ Could not connect to voice channel. All nodes failed. Please try again!');
+                            }
+                            playerOptions.nodeName = altNode.name;
+                            console.log(`   └─ Retry ${attempt}: using node ${altNode.name}`);
+                        }
+
+                        player = await kazagumo.createPlayer(playerOptions);
+                        break; // success
+                    } catch (createError) {
+                        console.error(`Error creating player (attempt ${attempt}/${maxRetries}):`, createError.message);
+                        console.error(`   └─ status=${createError.status} path=${createError.path}`);
+                        const nodeStates = [...kazagumo.shoukaku.nodes.entries()].map(([name, n]) => `${name}:state=${n.state}`).join(', ');
+                        console.error(`   └─ nodes: ${nodeStates}`);
+
+                        // Mark the failing node so we don't pick it again
+                        if (attempt === 1) {
+                            // First attempt used getLeastUsedNode() — identify it via session ID in error path
+                            const sessionMatch = createError.path?.match(/\/sessions\/([^/]+)\//);
+                            if (sessionMatch) {
+                                const failedNode = [...kazagumo.shoukaku.nodes.values()]
+                                    .find(n => n.sessionId === sessionMatch[1]);
+                                if (failedNode) {
+                                    triedNodes.add(failedNode.name);
+                                    console.log(`   └─ Marked failed node: ${failedNode.name}`);
+                                }
+                            }
+                        }
+
+                        // Clean up partial player/connection state before retrying
+                        try {
+                            const stale = kazagumo.players.get(interaction.guild.id);
+                            if (stale) await stale.destroy();
+                        } catch (e) { /* ignore */ }
+                        try {
+                            if (kazagumo.shoukaku.connections.has(interaction.guild.id)) {
+                                kazagumo.shoukaku.connections.get(interaction.guild.id).disconnect();
+                                kazagumo.shoukaku.connections.delete(interaction.guild.id);
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        if (attempt >= maxRetries) {
+                            return interaction.editReply('❌ Could not connect to voice channel. Please try again!');
+                        }
+                        await new Promise(r => setTimeout(r, 1000));
                     }
+                }
+                if (!player) {
+                    return interaction.editReply('❌ Could not connect to voice channel. Please try again!');
                 }
             }
 
