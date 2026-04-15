@@ -400,6 +400,8 @@ kazagumo.on('playerEnd', async (player) => {
 });
 
 function scheduleDisconnect(player, kazagumo) {
+    // If there's already an empty-channel timer running for this guild, skip — it will handle cleanup
+    if (emptyChannelTimers.has(player.guildId)) return;
     setTimeout(async () => {
         try {
             const p = kazagumo.players.get(player.guildId);
@@ -434,6 +436,8 @@ kazagumo.on('playerException', async (player, error) => {
 // Handle player disconnect
 kazagumo.on('playerDestroy', (player) => {
     console.log(`Player destroyed for guild ${player.guildId}`);
+    // Cancel any pending auto-disconnect timers so they don't linger in memory
+    cancelEmptyChannelDisconnect(player.guildId);
 });
 
 // Track per-guild "empty channel" disconnect timers

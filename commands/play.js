@@ -138,49 +138,62 @@ export default {
                 return interaction.editReply('❌ No results found for your search!');
             }
 
-            const track = result.tracks[0];
+            const isPlaylist = result.type === 'PLAYLIST';
+            const tracksToAdd = isPlaylist ? result.tracks : [result.tracks[0]];
+            const track = tracksToAdd[0];
             const queueLengthBefore = player.queue.length;
             const isCurrentlyPlaying = player.playing || player.paused;
             const currentTrack = player.queue.current;
-            
-            console.log(`   └─ Found: ${track.title}`);
+
+            if (isPlaylist) {
+                console.log(`   └─ Playlist: ${result.playlistName ?? 'Unknown'} (${tracksToAdd.length} tracks)`);
+            } else {
+                console.log(`   └─ Found: ${track.title}`);
+            }
             console.log(`   └─ Queue before: ${queueLengthBefore} tracks | Currently playing: ${isCurrentlyPlaying ? currentTrack?.title : 'Nothing'}`);
-            
-            await player.queue.add(track);
-            
+
+            for (const t of tracksToAdd) {
+                await player.queue.add(t);
+            }
+
             // Update autoplay context when a song is manually added
-            // This ensures autoplay uses the latest manually added song as context
             if (player._autoplay) {
                 player._autoplayContext = track;
                 console.log(`   └─ 🔄 Updated autoplay context to: ${track.title}`);
             }
-            
+
             const queueLengthAfter = player.queue.length;
             console.log(`   └─ ✅ Added to queue | Queue now: ${queueLengthAfter} tracks`);
 
             const embed = new EmbedBuilder()
                 .setColor(0x5865F2)
-                .setTitle('🎵 Song added')
-                .setDescription(`**[${track.title}](${track.uri})**`)
-                .addFields(
-                    { name: '👤 Requested by', value: `${interaction.user}`, inline: true },
-                    { name: '⏱️ Duration', value: track.length > 0 ? formatTime(track.length) : 'Live', inline: true }
-                )
                 .setThumbnail(track.thumbnail || null)
                 .setTimestamp();
+
+            if (isPlaylist) {
+                embed.setTitle('📋 Playlist added')
+                    .setDescription(`**${result.playlistName ?? 'Playlist'}** — ${tracksToAdd.length} songs added to queue`)
+                    .addFields({ name: '👤 Requested by', value: `${interaction.user}`, inline: true });
+            } else {
+                embed.setTitle('🎵 Song added')
+                    .setDescription(`**[${track.title}](${track.uri})**`)
+                    .addFields(
+                        { name: '👤 Requested by', value: `${interaction.user}`, inline: true },
+                        { name: '⏱️ Duration', value: track.length > 0 ? formatTime(track.length) : 'Live', inline: true }
+                    );
+            }
 
             if (!player.playing && !player.paused) {
                 try {
                     console.log(`   └─ Starting playback: ${track.title}`);
                     await player.play();
-                    embed.setDescription(`🎵 **Now playing:** [${track.title}](${track.uri})`);
+                    if (!isPlaylist) embed.setDescription(`🎵 **Now playing:** [${track.title}](${track.uri})`);
                     console.log(`   └─ ✅ Now playing: ${track.title}`);
                 } catch (playError) {
                     console.error(`   └─ ❌ Error starting playback:`, playError);
-                    // Don't fail the command if play fails, just show the track was added
                 }
             } else {
-                console.log(`   └─ Track added to queue (${queueLengthAfter} total). Currently playing: ${currentTrack?.title}`);
+                console.log(`   └─ Added to queue (${queueLengthAfter} total). Currently playing: ${currentTrack?.title}`);
             }
 
             await interaction.editReply({ embeds: [embed] });
