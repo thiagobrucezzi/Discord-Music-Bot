@@ -407,7 +407,7 @@ function scheduleDisconnect(player, kazagumo) {
         } catch (err) {
             console.error('Error destroying inactive player:', err);
         }
-    }, 300000); // 5 minutes of inactivity
+    }, 3600000); // 1 hour of inactivity
 }
 
 // Handle player errors
@@ -436,9 +436,58 @@ kazagumo.on('playerDestroy', (player) => {
     console.log(`Player destroyed for guild ${player.guildId}`);
 });
 
-// Detect when bot is manually disconnected from voice channel
+// Track per-guild "empty channel" disconnect timers
+const emptyChannelTimers = new Map();
+
+function scheduleEmptyChannelDisconnect(guildId) {
+    if (emptyChannelTimers.has(guildId)) return; // already scheduled
+    console.log(`🔇 Voice channel empty in guild ${guildId}, disconnecting in 1 hour`);
+    const timer = setTimeout(async () => {
+        emptyChannelTimers.delete(guildId);
+        const player = kazagumo.players.get(guildId);
+        if (!player) return;
+        try {
+            player.queue.clear();
+            await player.destroy();
+            console.log(`🔇 Disconnected from empty channel in guild ${guildId} after 1 hour`);
+        } catch (err) {
+            console.error('Error disconnecting from empty channel:', err);
+        }
+    }, 3600000); // 1 hour
+    emptyChannelTimers.set(guildId, timer);
+}
+
+function cancelEmptyChannelDisconnect(guildId) {
+    const timer = emptyChannelTimers.get(guildId);
+    if (timer) {
+        clearTimeout(timer);
+        emptyChannelTimers.delete(guildId);
+        console.log(`✅ Someone joined in guild ${guildId}, cancelled empty-channel timer`);
+    }
+}
+
+// Detect when users join/leave the bot's voice channel
 client.on('voiceStateUpdate', async (oldState, newState) => {
-    // Only care about the bot's own voice state
+    const guildId = oldState.guild.id;
+    const player = kazagumo.players.get(guildId);
+
+    // Check if a human user left/joined the bot's channel
+    if (newState.member?.id !== client.user?.id && player?.voiceId) {
+        const botChannelId = player.voiceId;
+        const channel = oldState.guild.channels.cache.get(botChannelId);
+        if (!channel) return;
+
+        const humanCount = channel.members.filter(m => !m.user.bot).size;
+
+        if (humanCount === 0) {
+            scheduleEmptyChannelDisconnect(guildId);
+        } else {
+            cancelEmptyChannelDisconnect(guildId);
+        }
+        return;
+    }
+
+    // Detect when bot itself is manually disconnected from voice channel
     if (newState.member?.id !== client.user?.id) return;
 
     const guildId = newState.guild.id;
