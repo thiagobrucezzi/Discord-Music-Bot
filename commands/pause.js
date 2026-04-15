@@ -28,7 +28,7 @@ export default {
         const embed = new EmbedBuilder()
             .setColor(0xFEE75C)
             .setTitle('⏸️ Playback paused')
-            .setDescription(`Paused: **${player.queue.current.title}**`)
+            .setDescription(`Paused: **${player.queue.current?.title ?? 'Unknown'}**`)
             .setTimestamp();
 
         await interaction.reply({ embeds: [embed] });

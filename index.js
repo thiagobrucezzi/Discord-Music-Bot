@@ -22,31 +22,42 @@ const client = new Client({
 });
 
 // Helper: fetch available Lavalink v4 SSL nodes from public API
-async function fetchLavalinkNodes(maxNodes = 10) {
-    try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 6000);
-        const response = await fetch('https://lavalink-list.ajieblogs.eu.org/SSL', {
-            signal: controller.signal
-        });
-        clearTimeout(timeout);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const list = await response.json();
-        const v4Nodes = list
-            .filter(n => n.version === 'v4' && !n.host.includes('-v3.') && !n.host.startsWith('lavalink-v3'))
-            .slice(0, maxNodes)
-            .map(n => ({
-                name: n.identifier,
-                url: `${n.host}:${n.port}`,
-                auth: n.password,
-                secure: Boolean(n.secure)
-            }));
-        console.log(`📡 API returned ${v4Nodes.length} v4 SSL nodes`);
-        return v4Nodes;
-    } catch (error) {
-        console.warn(`⚠️ Could not fetch nodes from API: ${error.message}`);
-        return [];
+async function fetchLavalinkNodes(maxNodes = 20) {
+    const apis = [
+        'https://lavalink-list.ajieblogs.eu.org/SSL',
+        'https://lavalink-list.ajieblogs.eu.org/all',
+    ];
+    for (const apiUrl of apis) {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 8000);
+            const response = await fetch(apiUrl, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!response.ok) continue;
+            const list = await response.json();
+            const v4Nodes = list
+                .filter(n =>
+                    (n.version === 'v4' || String(n.version).startsWith('4')) &&
+                    !n.host.includes('-v3.') &&
+                    !n.host.startsWith('lavalink-v3') &&
+                    (n.secure || n.port === 443)
+                )
+                .slice(0, maxNodes)
+                .map(n => ({
+                    name: n.identifier || n.name || n.host,
+                    url: `${n.host}:${n.port}`,
+                    auth: n.password,
+                    secure: Boolean(n.secure || n.port === 443)
+                }));
+            if (v4Nodes.length > 0) {
+                console.log(`📡 API (${apiUrl}) returned ${v4Nodes.length} v4 SSL nodes`);
+                return v4Nodes;
+            }
+        } catch (error) {
+            console.warn(`⚠️ Could not fetch nodes from ${apiUrl}: ${error.message}`);
+        }
     }
+    return [];
 }
 
 // Primary node from .env
@@ -62,10 +73,12 @@ const primaryNode = {
 };
 
 // Hardcoded fallback nodes (v4, SSL) — used if API is unreachable
+// These are community-hosted public nodes; they may go down at any time.
+// Note: jirayu.net is excluded — it rate-limits (429) under heavy reconnect load.
 const fallbackNodes = [
-    { name: 'serenetia-v4',    url: 'lavalinkv4.serenetia.com:443',      auth: 'https://seretia.link/discord', secure: true },
-    { name: 'jirayu-v4',       url: 'lavalink.jirayu.net:443',           auth: 'youshallnotpass',              secure: true },
-    { name: 'triniumhost-v4',  url: 'lavalink-v4.triniumhost.com:443',   auth: 'free',                         secure: true },
+    { name: 'triniumhost-v4',    url: 'lavalink-v4.triniumhost.com:443',      auth: 'free',                         secure: true },
+    { name: 'serenetia-v4',      url: 'lavalinkv4.serenetia.com:443',         auth: 'https://seretia.link/discord', secure: true },
+    { name: 'lavalinkv4-2',      url: 'lavalinkv4-2.serenetia.com:443',       auth: 'https://seretia.link/discord', secure: true },
 ];
 
 console.log(`🔍 Fetching Lavalink nodes from public API...`);
@@ -100,9 +113,9 @@ const kazagumo = new Kazagumo(
         moveOnDisconnect: true,   // auto-move players to another node if one dies
         resumable: false,
         resumableTimeout: 30,
-        reconnectTries: 3,
-        reconnectInterval: 5000,
-        restTimeout: 15000
+        reconnectTries: 2,
+        reconnectInterval: 30000,
+        restTimeout: 20000
     }
 );
 
@@ -394,7 +407,7 @@ function scheduleDisconnect(player, kazagumo) {
         } catch (err) {
             console.error('Error destroying inactive player:', err);
         }
-    }, 3600000); // 1 hour of inactivity
+    }, 300000); // 5 minutes of inactivity
 }
 
 // Handle player errors

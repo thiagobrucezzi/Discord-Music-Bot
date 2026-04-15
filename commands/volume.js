@@ -3,7 +3,7 @@ import { SlashCommandBuilder, EmbedBuilder } from 'discord.js';
 export default {
     data: new SlashCommandBuilder()
         .setName('volume')
-        .setDescription('Adjusts volume (0-200)')
+        .setDescription('Adjusts volume (0-100)')
         .addIntegerOption(option =>
             option.setName('level')
                 .setDescription('Volume level between 0 and 100')

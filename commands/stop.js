@@ -19,8 +19,12 @@ export default {
             return interaction.reply('❌ You must be in the same voice channel as the bot!');
         }
 
-        player.queue.clear();
-        await player.destroy();
+        try {
+            player.queue.clear();
+            await player.destroy();
+        } catch (err) {
+            console.error('Error stopping player:', err);
+        }
 
         const embed = new EmbedBuilder()
             .setColor(0xED4245)

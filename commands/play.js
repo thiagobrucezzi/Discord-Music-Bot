@@ -70,51 +70,40 @@ export default {
 
             // Create new player if it doesn't exist or was destroyed
             if (!player) {
-                const maxRetries = 3;
                 const triedNodes = new Set();
 
-                for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                // Build ordered list: all connected nodes first, then iterate all of them
+                const allNodes = [...kazagumo.shoukaku.nodes.values()];
+                const connectedNodes = allNodes.filter(n => n.state === 1);
+
+                console.log(`   └─ Nodes available: ${allNodes.length} total, ${connectedNodes.length} connected`);
+                allNodes.forEach(n => console.log(`      • ${n.name} state=${n.state}`));
+
+                if (connectedNodes.length === 0) {
+                    console.warn(`   └─ No connected nodes at all`);
+                    return interaction.editReply('❌ No Lavalink nodes are online right now. Please wait a moment and try again!');
+                }
+
+                // Try every connected node until one works
+                for (const node of connectedNodes) {
+                    if (triedNodes.has(node.name)) continue;
+                    triedNodes.add(node.name);
+
                     try {
                         const playerOptions = {
                             guildId: interaction.guild.id,
                             voiceId: voiceChannel.id,
                             textId: interaction.channel.id,
-                            deaf: true
+                            deaf: true,
+                            nodeName: node.name
                         };
 
-                        // On retries, pick a connected node we haven't tried yet
-                        if (attempt > 1) {
-                            const altNode = [...kazagumo.shoukaku.nodes.values()]
-                                .find(n => n.state === 1 && !triedNodes.has(n.name));
-                            if (!altNode) {
-                                console.warn(`   └─ No more nodes to retry`);
-                                return interaction.editReply('❌ Could not connect to voice channel. All nodes failed. Please try again!');
-                            }
-                            playerOptions.nodeName = altNode.name;
-                            console.log(`   └─ Retry ${attempt}: using node ${altNode.name}`);
-                        }
-
+                        console.log(`   └─ Trying node: ${node.name} (${triedNodes.size}/${connectedNodes.length})`);
                         player = await kazagumo.createPlayer(playerOptions);
+                        console.log(`   └─ ✅ Connected via node: ${node.name}`);
                         break; // success
                     } catch (createError) {
-                        console.error(`Error creating player (attempt ${attempt}/${maxRetries}):`, createError.message);
-                        console.error(`   └─ status=${createError.status} path=${createError.path}`);
-                        const nodeStates = [...kazagumo.shoukaku.nodes.entries()].map(([name, n]) => `${name}:state=${n.state}`).join(', ');
-                        console.error(`   └─ nodes: ${nodeStates}`);
-
-                        // Mark the failing node so we don't pick it again
-                        if (attempt === 1) {
-                            // First attempt used getLeastUsedNode() — identify it via session ID in error path
-                            const sessionMatch = createError.path?.match(/\/sessions\/([^/]+)\//);
-                            if (sessionMatch) {
-                                const failedNode = [...kazagumo.shoukaku.nodes.values()]
-                                    .find(n => n.sessionId === sessionMatch[1]);
-                                if (failedNode) {
-                                    triedNodes.add(failedNode.name);
-                                    console.log(`   └─ Marked failed node: ${failedNode.name}`);
-                                }
-                            }
-                        }
+                        console.error(`   └─ ❌ Node ${node.name} failed: ${createError.message}`);
 
                         // Clean up partial player/connection state before retrying
                         try {
@@ -128,14 +117,13 @@ export default {
                             }
                         } catch (e) { /* ignore */ }
 
-                        if (attempt >= maxRetries) {
-                            return interaction.editReply('❌ Could not connect to voice channel. Please try again!');
-                        }
-                        await new Promise(r => setTimeout(r, 1000));
+                        await new Promise(r => setTimeout(r, 500));
                     }
                 }
+
                 if (!player) {
-                    return interaction.editReply('❌ Could not connect to voice channel. Please try again!');
+                    console.warn(`   └─ All ${connectedNodes.length} nodes failed`);
+                    return interaction.editReply('❌ Could not connect to voice channel. All nodes failed. Please try again!');
                 }
             }
 

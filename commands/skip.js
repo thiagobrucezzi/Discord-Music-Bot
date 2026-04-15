@@ -28,7 +28,7 @@ export default {
 
         console.log(`⏭️ Skip | Guild: ${interaction.guild.id} | Skipping: ${currentTrack.title} | Next: ${nextTrack?.title ?? 'nothing'}`);
 
-        player.skip();
+        await player.skip();
 
         const embed = new EmbedBuilder()
             .setColor(0x5865F2)

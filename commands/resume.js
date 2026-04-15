@@ -28,7 +28,7 @@ export default {
         const embed = new EmbedBuilder()
             .setColor(0x57F287)
             .setTitle('▶️ Playback resumed')
-            .setDescription(`Playing: **${player.queue.current.title}**`)
+            .setDescription(`Playing: **${player.queue.current?.title ?? 'Unknown'}**`)
             .setTimestamp();
 
         await interaction.reply({ embeds: [embed] });
