@@ -490,9 +490,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     // Detect when bot itself is manually disconnected from voice channel
     if (newState.member?.id !== client.user?.id) return;
 
-    const guildId = newState.guild.id;
-    const player = kazagumo.players.get(guildId);
-
     // If bot was disconnected from voice channel (channel changed from something to null)
     if (oldState.channelId && !newState.channelId && player) {
         console.log(`⚠️ Bot was manually disconnected from voice channel in guild ${guildId}`);
