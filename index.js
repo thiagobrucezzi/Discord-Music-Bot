@@ -40,6 +40,7 @@ async function fetchLavalinkNodes(maxNodes = 20) {
                     (n.version === 'v4' || String(n.version).startsWith('4')) &&
                     !n.host.includes('-v3.') &&
                     !n.host.startsWith('lavalink-v3') &&
+                    !n.host.includes('jirayu.net') &&
                     (n.secure || n.port === 443)
                 )
                 .slice(0, maxNodes)
