@@ -24,6 +24,22 @@ export default {
             return interaction.editReply('❌ You must be in a voice channel to use this command!');
         }
 
+        // Helper: destroy stale player (session expired after node restart)
+        async function destroyStalePlayer() {
+            const stale = kazagumo.players.get(interaction.guild.id);
+            if (stale) {
+                try { await stale.destroy(); } catch (e) { /* ignore */ }
+            }
+            try {
+                if (kazagumo.shoukaku.connections.has(interaction.guild.id)) {
+                    kazagumo.shoukaku.connections.get(interaction.guild.id).disconnect();
+                    kazagumo.shoukaku.connections.delete(interaction.guild.id);
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        let _retried = false;
+        const attemptPlay = async () => {
         try {
             // Check if player already exists for this guild
             let player = kazagumo.players.get(interaction.guild.id);
@@ -199,7 +215,19 @@ export default {
             await interaction.editReply({ embeds: [embed] });
         } catch (error) {
             console.error('Error in play:', error);
-            
+
+            // Session expired after Lavalink node restart — destroy stale player and retry once
+            const isSessionError = error.status === 404 ||
+                error.message?.includes('Session not found') ||
+                error.message?.includes('session');
+            if (isSessionError && !_retried) {
+                _retried = true;
+                console.warn('   └─ 🔄 Stale session detected, destroying player and retrying...');
+                await destroyStalePlayer();
+                await new Promise(r => setTimeout(r, 800));
+                return attemptPlay();
+            }
+
             // More specific error messages
             let errorMessage = '❌ There was an error playing the song!';
             if (error.message?.includes('404') || error.status === 404) {
@@ -209,9 +237,11 @@ export default {
             } else if (error.message?.includes('timeout') || error.message?.includes('handshake')) {
                 errorMessage = '❌ Connection timeout. Please try again!';
             }
-            
+
             await interaction.editReply(errorMessage);
         }
+        }; // end attemptPlay
+        return attemptPlay();
     }
 };
 
