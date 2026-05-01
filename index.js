@@ -123,6 +123,14 @@ const kazagumo = new Kazagumo(
 // Get Shoukaku instance from Kazagumo for events
 const shoukaku = kazagumo.shoukaku;
 
+// Flapping-node detector: if a node closes within FLAP_WINDOW_MS of becoming ready
+// FLAP_THRESHOLD times, remove it from the pool. Prevents reconnect storms against
+// dead-upstream proxies (e.g. proxy-close:lavalink-error) that would otherwise
+// reset Shoukaku's retry counter on every brief "connect" and trigger 429 rate limits.
+const FLAP_WINDOW_MS = 5000;
+const FLAP_THRESHOLD = 3;
+const nodeFlapState = new Map(); // name -> { readyAt, flaps, removed }
+
 // Commands collection
 client.commands = new Collection();
 
@@ -141,16 +149,51 @@ for (const file of commandFiles) {
 // Shoukaku events
 shoukaku.on('ready', (name) => {
     console.log(`✅ Lavalink ${name}: Connected!`);
+    const state = nodeFlapState.get(name) || { readyAt: 0, flaps: 0, removed: false };
+    state.readyAt = Date.now();
+    nodeFlapState.set(name, state);
 });
 
 shoukaku.on('error', (name, error) => {
     console.error(`❌ Lavalink ${name}: Error -`, error);
-    // Don't crash on Lavalink errors, just log them
+    // 429 = rate limited by the host; treat as a flap so we eject the node fast.
+    const msg = error?.message || '';
+    if (msg.includes('429') || msg.includes('Unexpected server response: 429')) {
+        const state = nodeFlapState.get(name) || { readyAt: 0, flaps: 0, removed: false };
+        state.flaps = FLAP_THRESHOLD; // force removal on next close
+        nodeFlapState.set(name, state);
+    }
 });
 
 shoukaku.on('close', (name, code, reason) => {
     console.warn(`⚠️ Lavalink ${name}: Closed - Code: ${code}, Reason: ${reason || 'No reason'}`);
-    // Attempt to reconnect automatically
+
+    const state = nodeFlapState.get(name) || { readyAt: 0, flaps: 0, removed: false };
+    if (state.removed) return;
+
+    const sinceReady = state.readyAt > 0 ? Date.now() - state.readyAt : Infinity;
+    const isProxyClose = typeof reason === 'string' && reason.includes('proxy-close');
+
+    if (sinceReady < FLAP_WINDOW_MS || isProxyClose) {
+        state.flaps += 1;
+        nodeFlapState.set(name, state);
+        console.warn(`   └─ Flap detected on ${name} (${state.flaps}/${FLAP_THRESHOLD}, ${sinceReady}ms after ready)`);
+
+        if (state.flaps >= FLAP_THRESHOLD) {
+            state.removed = true;
+            nodeFlapState.set(name, state);
+            try {
+                shoukaku.removeNode(name, 'flapping/dead-upstream');
+                console.warn(`   └─ 🚫 Node ${name} removed from pool after ${state.flaps} flaps`);
+            } catch (err) {
+                console.error(`   └─ Error removing node ${name}:`, err.message);
+            }
+        }
+    } else {
+        // Clean disconnect after a stable session — reset counter.
+        state.flaps = 0;
+        nodeFlapState.set(name, state);
+    }
 });
 
 shoukaku.on('disconnect', (name, players, moved) => {
