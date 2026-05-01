@@ -4,13 +4,17 @@ Complete music bot for Discord using **Kazagumo**, **Shoukaku** and **Lavalink**
 
 ## ✨ Features
 
-- ✅ Music playback from YouTube
+- ✅ Music playback from YouTube (single tracks, search queries, and full playlists)
 - ✅ Queue system with shuffle
 - ✅ Full playback control (play, pause, resume, stop, skip, queue)
 - ✅ Volume adjustment (0–100%)
 - ✅ Queue visualization
-- ✅ Autoplay — automatically plays related songs when the queue ends
-- ✅ **Multi-node Lavalink failover** — connects to multiple public nodes simultaneously; if one goes down, playback continues seamlessly
+- ✅ **Smart autoplay** — when the queue ends, searches for related songs using artist extraction, keeps a 10-track history to avoid loops, and filters out non-music content (tutorials, radio streams, etc.)
+- ✅ **Multi-node Lavalink failover** — auto-discovers public v4 nodes from a public API plus hardcoded fallbacks, and `/play` retries across every connected node until one accepts the player
+- ✅ **Flapping-node detector** — nodes that disconnect 3 times within 5s (or proxy-close) are removed from the pool to prevent reconnect storms / 429 rate limits
+- ✅ **Stale-session recovery** — if a Lavalink node restarts mid-session, `/play` destroys the dead player and retries automatically
+- ✅ **Auto-disconnect** — leaves the channel after 1 hour if the queue is empty or no humans remain in the voice channel
+- ✅ **Manual-disconnect cleanup** — if someone kicks the bot from the voice channel, the player is destroyed cleanly
 - ✅ Modern slash commands
 
 ## 📋 Requirements
@@ -122,15 +126,26 @@ This will install all necessary dependencies.
 Copy `.env.example` to `.env` and fill in your values:
 
 ```bash
+# macOS / Linux / Git Bash
 cp .env.example .env
+
+# Windows CMD
+copy .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
 
 ```env
 # Discord bot token (REQUIRED)
 DISCORD_TOKEN=your_token_here
 
-# Bot Application ID (REQUIRED for deploying commands)
+# Bot Application ID (OPTIONAL — auto-fetched from Discord API if omitted)
 DISCORD_CLIENT_ID=your_application_id
+
+# Server ID for instant slash-command registration (OPTIONAL)
+# If omitted, commands register globally (can take up to 1 hour to appear)
+GUILD_ID=your_server_id
 
 # Primary Lavalink node (REQUIRED)
 # The bot auto-discovers additional public nodes for redundancy.
@@ -142,7 +157,8 @@ LAVALINK_SECURE=true
 ### 5.2 Fill in the Values
 
 - **`DISCORD_TOKEN`:** The token you copied in Step 2.3 (REQUIRED)
-- **`DISCORD_CLIENT_ID`:** The Application ID you copied in Step 2.4 (REQUIRED for `npm run deploy`)
+- **`DISCORD_CLIENT_ID`:** The Application ID you copied in Step 2.4. **Optional** — if omitted, `npm run deploy` fetches it from the Discord API using your token.
+- **`GUILD_ID`:** Your server ID (Step 3.3). **Optional** — if set, slash commands appear on that server within 1-2 minutes. If omitted, they register globally and may take up to 1 hour.
 - **`LAVALINK_URL` / `LAVALINK_PASSWORD` / `LAVALINK_SECURE`:** Your primary Lavalink node. The bot will automatically connect to additional public nodes for redundancy — so even if the primary is down, music keeps playing.
 
 ---
@@ -209,6 +225,57 @@ If you want to run your own Lavalink server:
    LAVALINK_PASSWORD=youshallnotpass
    LAVALINK_SECURE=false
    ```
+
+---
+
+## 🧠 How it Works (Internals)
+
+This section documents the runtime behavior so you can understand the logs and tune things if needed.
+
+### Multi-node failover
+
+- On startup, the bot fetches Lavalink v4 SSL nodes from `lavalink-list.ajieblogs.eu.org`.
+- It also keeps a small list of **hardcoded fallback nodes** (`triniumhost`, `serenetia`) used if the API is unreachable.
+- The primary node from `.env`, the API nodes and the fallbacks are merged, deduplicated by URL, and all are connected at once.
+- When you run `/play`, the bot iterates through **every connected node** until one accepts the player creation. Stale players/connections are cleaned up between attempts.
+
+### Flapping-node detector
+
+Some public nodes "connect → close → reconnect" in a tight loop (often `proxy-close: lavalink-error`), which resets Shoukaku's retry counter and quickly triggers `429 Too Many Requests` from the host. To prevent this:
+
+- A node that closes within **5 seconds** of becoming `ready` (or with a `proxy-close` reason) counts as a "flap".
+- After **3 flaps**, the node is removed from the pool for the rest of the session.
+- A `429` error on a node forces it to be removed on the next close.
+
+You'll see logs like `Flap detected on serenetia-v4 (2/3, 1240ms after ready)` and eventually `🚫 Node X removed from pool after 3 flaps`.
+
+### Stale-session recovery
+
+If a Lavalink node restarts while the bot has an active session, the next `/play` would normally fail with `404 Session not found`. The play command catches this, destroys the dead player + voice connection, waits ~800ms, and retries once automatically.
+
+### Smart autoplay
+
+When the queue ends and `/autoplay on` is active:
+
+1. The bot extracts the **artist name** from the current track title (text before `-` or `|`).
+2. It searches that artist for related songs.
+3. Results are filtered to exclude:
+   - Same URI / same title as the current track
+   - Anything in the player's **last-10 history** (deduplicates by URI and by significant word overlap)
+   - Non-music keywords (`tutorial`, `how to`, `radio concierto`, `live radio`, etc.)
+4. The first valid related track is added and played, and `_autoplayContext` is updated so the next round chains naturally.
+5. Manually adding a song with `/play` while autoplay is on **updates the autoplay context** to that new track, so future related searches branch from your latest pick.
+
+### Auto-disconnect timers
+
+Two independent 1-hour timers keep the bot from idling forever:
+
+| Trigger | Behavior |
+|---------|----------|
+| Queue empty + autoplay disabled (or autoplay found nothing) | Disconnect after **1 hour** of inactivity |
+| All humans leave the bot's voice channel | Disconnect after **1 hour**. Cancelled if anyone rejoins. |
+
+If someone manually disconnects the bot from the voice channel, the player is destroyed cleanly after a 3s grace period (to avoid races during initial connection).
 
 ---
 
@@ -528,7 +595,7 @@ If everything is okay, you should see in the logs:
 
 | Command | Description |
 |---------|-------------|
-| `/play <song>` | Plays a song or adds it to the queue (name or URL) |
+| `/play <song>` | Plays a song, adds it to the queue, or queues a full **playlist** (search, track URL, or playlist URL) |
 | `/skip` | Skips to the next song |
 | `/pause` | Pauses playback |
 | `/resume` | Resumes playback |
@@ -536,7 +603,7 @@ If everything is okay, you should see in the logs:
 | `/queue` | Shows the current playback queue |
 | `/shuffle` | Shuffles the songs in the queue |
 | `/volume <0-100>` | Adjusts volume (0–100%) |
-| `/autoplay <on/off>` | Automatically plays related songs when the queue ends |
+| `/autoplay <on/off>` | Automatically plays related songs when the queue ends (see [Smart autoplay](#smart-autoplay)) |
 
 ## 📖 Usage Guide
 
@@ -610,6 +677,8 @@ Discord-Music-Bot/
 - ✅ If using port 443, make sure `LAVALINK_SECURE=true`
 - ✅ The bot auto-connects to multiple public nodes — if the primary is down, others will be used automatically
 - ✅ Check the startup logs: you should see multiple "✅ Lavalink X: Connected!" lines
+- ✅ If you see `🚫 Node X removed from pool after 3 flaps`, that node is dead/unstable and the bot intentionally ejected it — playback continues on remaining nodes
+- ✅ If `/play` says `❌ No Lavalink nodes are online right now`, all nodes failed at once — wait a few seconds and try again, the bot keeps reconnecting in the background
 
 ### Commands don't appear
 
@@ -624,6 +693,11 @@ Discord-Music-Bot/
 - ✅ Make sure you're in a voice channel before using `/play`
 - ✅ Verify that the bot has permissions to connect to the channel
 
+### Bot disconnected by itself
+
+- ✅ Expected: the bot leaves after **1 hour** of an empty queue (with autoplay off) or **1 hour** alone in the voice channel — see [Auto-disconnect timers](#auto-disconnect-timers)
+- ✅ If it disconnected mid-song, check the logs for `Lavalink X: Closed` — the node likely dropped. The bot will auto-recover via failover on the next `/play`
+
 ---
 
 ## 📝 Important Notes
@@ -634,6 +708,8 @@ Discord-Music-Bot/
 - Port 443 requires `LAVALINK_SECURE=true`
 - The `.env` should NOT be uploaded to GitHub (it's in `.gitignore`)
 - The `.env` MUST be uploaded to Wispbyte manually
+- The bot auto-disconnects after **1 hour** of inactivity or **1 hour** alone in the voice channel
+- If you have a leftover `env` file (no dot) in the project root, it's safe to delete — it's a legacy artifact and is already ignored by Git
 
 ---
 
