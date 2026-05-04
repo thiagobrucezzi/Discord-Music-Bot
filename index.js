@@ -123,13 +123,50 @@ const kazagumo = new Kazagumo(
 // Get Shoukaku instance from Kazagumo for events
 const shoukaku = kazagumo.shoukaku;
 
-// Flapping-node detector: if a node closes within FLAP_WINDOW_MS of becoming ready
-// FLAP_THRESHOLD times, remove it from the pool. Prevents reconnect storms against
-// dead-upstream proxies (e.g. proxy-close:lavalink-error) that would otherwise
-// reset Shoukaku's retry counter on every brief "connect" and trigger 429 rate limits.
+// Flapping-node detector. Two trip conditions, whichever fires first:
+//   1) FLAP_THRESHOLD closes within FLAP_WINDOW_MS of "ready", OR a proxy-close reason
+//   2) STORM_THRESHOLD total closes within STORM_WINDOW_MS (catches dead nodes that
+//      never fire 'ready' and whose close reason doesn't include 'proxy-close')
+// Tripping calls killNodeHard(): shoukaku.removeNode() ALONE does not stop reconnects
+// (the Node instance keeps its own connect→close→connect loop running internally), so
+// we also monkey-patch close/connect to no-ops, terminate the underlying ws, and
+// strip listeners.
 const FLAP_WINDOW_MS = 5000;
 const FLAP_THRESHOLD = 3;
-const nodeFlapState = new Map(); // name -> { readyAt, flaps, removed }
+const STORM_WINDOW_MS = 5000;
+const STORM_THRESHOLD = 5;
+const nodeFlapState = new Map(); // name -> { readyAt, flaps, removed, closes: number[] }
+
+function killNodeHard(name, reason) {
+    const state = nodeFlapState.get(name) || { readyAt: 0, flaps: 0, removed: false, closes: [] };
+    if (state.removed) return;
+    state.removed = true;
+    nodeFlapState.set(name, state);
+
+    const node = shoukaku.nodes.get(name);
+    try {
+        shoukaku.removeNode(name, reason);
+    } catch (err) {
+        // node may already be gone; ignore
+    }
+    if (node) {
+        // Override the internal reconnect loop. After this, even if the ws fires a
+        // 'close' event, node.close() is a no-op so it won't call connect() again.
+        node.close = async () => {};
+        node.connect = async () => {};
+        try {
+            if (node.ws) {
+                node.ws.removeAllListeners('close');
+                node.ws.removeAllListeners('error');
+                node.ws.removeAllListeners('message');
+                node.ws.removeAllListeners('upgrade');
+                if (typeof node.ws.terminate === 'function') node.ws.terminate();
+            }
+        } catch (e) { /* ignore */ }
+        try { node.removeAllListeners(); } catch (e) { /* ignore */ }
+    }
+    console.warn(`   └─ 🚫 Node ${name} hard-killed (reason: ${reason})`);
+}
 
 // Commands collection
 client.commands = new Collection();
@@ -156,44 +193,50 @@ shoukaku.on('ready', (name) => {
 
 shoukaku.on('error', (name, error) => {
     console.error(`❌ Lavalink ${name}: Error -`, error);
-    // 429 = rate limited by the host; treat as a flap so we eject the node fast.
+    // 429 = rate-limited by the host. No point waiting for more flaps — kill now.
     const msg = error?.message || '';
-    if (msg.includes('429') || msg.includes('Unexpected server response: 429')) {
-        const state = nodeFlapState.get(name) || { readyAt: 0, flaps: 0, removed: false };
-        state.flaps = FLAP_THRESHOLD; // force removal on next close
-        nodeFlapState.set(name, state);
+    if (msg.includes('429')) {
+        killNodeHard(name, '429-rate-limited');
     }
 });
 
 shoukaku.on('close', (name, code, reason) => {
     console.warn(`⚠️ Lavalink ${name}: Closed - Code: ${code}, Reason: ${reason || 'No reason'}`);
 
-    const state = nodeFlapState.get(name) || { readyAt: 0, flaps: 0, removed: false };
+    const state = nodeFlapState.get(name) || { readyAt: 0, flaps: 0, removed: false, closes: [] };
     if (state.removed) return;
 
-    const sinceReady = state.readyAt > 0 ? Date.now() - state.readyAt : Infinity;
-    const isProxyClose = typeof reason === 'string' && reason.includes('proxy-close');
+    const now = Date.now();
+    state.closes = (state.closes || []).filter(t => now - t < STORM_WINDOW_MS);
+    state.closes.push(now);
+
+    const sinceReady = state.readyAt > 0 ? now - state.readyAt : Infinity;
+    const reasonStr = String(reason ?? '');
+    const isProxyClose = reasonStr.includes('proxy-close');
 
     if (sinceReady < FLAP_WINDOW_MS || isProxyClose) {
         state.flaps += 1;
         nodeFlapState.set(name, state);
-        console.warn(`   └─ Flap detected on ${name} (${state.flaps}/${FLAP_THRESHOLD}, ${sinceReady}ms after ready)`);
-
+        console.warn(`   └─ Flap detected on ${name} (${state.flaps}/${FLAP_THRESHOLD}, ${sinceReady}ms after ready, reason="${reasonStr}")`);
         if (state.flaps >= FLAP_THRESHOLD) {
-            state.removed = true;
-            nodeFlapState.set(name, state);
-            try {
-                shoukaku.removeNode(name, 'flapping/dead-upstream');
-                console.warn(`   └─ 🚫 Node ${name} removed from pool after ${state.flaps} flaps`);
-            } catch (err) {
-                console.error(`   └─ Error removing node ${name}:`, err.message);
-            }
+            killNodeHard(name, `flapping (${state.flaps} flaps)`);
+            return;
         }
     } else {
-        // Clean disconnect after a stable session — reset counter.
         state.flaps = 0;
-        nodeFlapState.set(name, state);
     }
+
+    // Storm guard: regardless of cause, if a node closes too many times in a short
+    // window it's hosed — kill it. Catches dead-upstream proxies whose 'ready' never
+    // fires AND whose close reason isn't 'proxy-close'.
+    if (state.closes.length >= STORM_THRESHOLD) {
+        nodeFlapState.set(name, state);
+        console.warn(`   └─ Storm detected on ${name} (${state.closes.length} closes in ${STORM_WINDOW_MS}ms)`);
+        killNodeHard(name, `storm (${state.closes.length} closes/${STORM_WINDOW_MS}ms)`);
+        return;
+    }
+
+    nodeFlapState.set(name, state);
 });
 
 shoukaku.on('disconnect', (name, players, moved) => {
