@@ -166,7 +166,76 @@ function killNodeHard(name, reason) {
         try { node.removeAllListeners(); } catch (e) { /* ignore */ }
     }
     console.warn(`   └─ 🚫 Node ${name} hard-killed (reason: ${reason})`);
+
+    // If we just killed the last connected node, ask for a fresh pool early
+    // instead of waiting for the next scheduled refresh.
+    const stillConnected = [...shoukaku.nodes.values()].some(n => n.state === 1);
+    if (!stillConnected) {
+        scheduleEmergencyRefresh();
+    }
 }
+
+// ─── Periodic node-pool refresh ─────────────────────────────────────────────
+// Public Lavalink hosts come and go. The startup fetch is a snapshot — without
+// a refresh, the pool monotonically shrinks as nodes get hard-killed. Every
+// REFRESH_INTERVAL_MS we re-query the API and add any fresh nodes the pool
+// doesn't already know. Nodes we previously hard-killed are skipped so they
+// don't immediately flap again.
+const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const EMERGENCY_REFRESH_COOLDOWN_MS = 5 * 60 * 1000; // 5 min
+let lastRefreshAt = Date.now(); // initial fetch already happened at startup
+let emergencyRefreshTimer = null;
+
+async function refreshNodePool(label = 'scheduled') {
+    lastRefreshAt = Date.now();
+    let fresh;
+    try {
+        fresh = await fetchLavalinkNodes();
+    } catch (err) {
+        console.error(`📡 [${label}] node refresh failed: ${err.message}`);
+        return;
+    }
+    if (!fresh.length) {
+        console.warn(`📡 [${label}] node refresh returned 0 nodes`);
+        return;
+    }
+
+    let added = 0;
+    for (const cfg of fresh) {
+        if (shoukaku.nodes.has(cfg.name)) continue;
+        if (nodeFlapState.get(cfg.name)?.removed) continue;
+        try {
+            shoukaku.addNode(cfg);
+            added += 1;
+            console.log(`   + Added node ${cfg.name} (${cfg.url})`);
+        } catch (err) {
+            console.error(`   ✗ Failed adding ${cfg.name}: ${err.message}`);
+        }
+    }
+    const connected = [...shoukaku.nodes.values()].filter(n => n.state === 1).length;
+    console.log(`📡 [${label}] node refresh: +${added} new, ${shoukaku.nodes.size} total, ${connected} connected`);
+}
+
+function scheduleEmergencyRefresh() {
+    if (emergencyRefreshTimer) return; // already scheduled
+    const elapsed = Date.now() - lastRefreshAt;
+    if (elapsed < EMERGENCY_REFRESH_COOLDOWN_MS) {
+        const wait = EMERGENCY_REFRESH_COOLDOWN_MS - elapsed;
+        console.warn(`📡 0 nodes connected, emergency refresh in ${Math.round(wait / 1000)}s`);
+        emergencyRefreshTimer = setTimeout(() => {
+            emergencyRefreshTimer = null;
+            refreshNodePool('emergency');
+        }, wait);
+    } else {
+        console.warn(`📡 0 nodes connected, emergency refresh now`);
+        emergencyRefreshTimer = setTimeout(() => {
+            emergencyRefreshTimer = null;
+            refreshNodePool('emergency');
+        }, 0);
+    }
+}
+
+setInterval(() => refreshNodePool('scheduled'), REFRESH_INTERVAL_MS);
 
 // Commands collection
 client.commands = new Collection();
