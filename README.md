@@ -8,12 +8,16 @@ Complete music bot for Discord using **Kazagumo**, **Shoukaku** and **Lavalink**
 - ✅ Queue system with shuffle
 - ✅ Full playback control (play, pause, resume, stop, skip, queue)
 - ✅ Volume adjustment (0–100%)
-- ✅ Queue visualization
-- ✅ **Smart autoplay** — when the queue ends, searches for related songs using artist extraction, keeps a 10-track history to avoid loops, and filters out non-music content (tutorials, radio streams, etc.)
+- ✅ Queue visualization, `/nowplaying` with progress bar, `/seek`, `/remove`, `/clear`, `/loop` (none/track/queue)
+- ✅ **In-channel control buttons** — every "Now playing" message ships with prev / pause / skip / stop / shuffle / loop / queue buttons (pause and loop re-render their icon/label live)
+- ✅ **Queue persistence + smart `/resume`** — the queue, current track and playback position are persisted to disk every 30s; if the bot is restarted, `/resume` reconnects to your voice channel, recreates the player and seeks back to where it was (state expires after 7 days)
+- ✅ **24/7 mode** — `/247 on` keeps the bot in voice even with an empty queue or empty channel
+- ✅ **Smart autoplay (YouTube Mix)** — when the queue ends, builds a YouTube Mix from the current track for context-aware recommendations, with an artist-name fallback if no mix is available
+- ✅ **`/status` command** — Discord WS ping, every Lavalink node's state/ping/players, uptime, RSS/heap memory, Node.js version, and the active node for the current guild
 - ✅ **Multi-node Lavalink failover** — auto-discovers public v4 nodes from a public API plus hardcoded fallbacks, and `/play` retries across every connected node until one accepts the player
 - ✅ **Flapping-node detector** — nodes that disconnect 3 times within 5s (or proxy-close) are removed from the pool to prevent reconnect storms / 429 rate limits
 - ✅ **Stale-session recovery** — if a Lavalink node restarts mid-session, `/play` destroys the dead player and retries automatically
-- ✅ **Auto-disconnect** — leaves the channel after 1 hour if the queue is empty or no humans remain in the voice channel
+- ✅ **Auto-disconnect** — leaves the channel after 1 hour if the queue is empty or no humans remain in the voice channel (skipped while 24/7 mode is on)
 - ✅ **Manual-disconnect cleanup** — if someone kicks the bot from the voice channel, the player is destroyed cleanly
 - ✅ Modern slash commands
 
@@ -257,14 +261,42 @@ If a Lavalink node restarts while the bot has an active session, the next `/play
 
 When the queue ends and `/autoplay on` is active:
 
-1. The bot extracts the **artist name** from the current track title (text before `-` or `|`).
-2. It searches that artist for related songs.
-3. Results are filtered to exclude:
+1. If the current track has a YouTube ID, the bot loads the corresponding **YouTube Mix** (`youtube.com/watch?v=ID&list=RDID`) — YouTube's "Radio based on" playlist — and uses those tracks as candidates.
+2. If the track is not from YouTube, or the Mix returns nothing, the bot falls back to extracting the **artist name** from the title (text before `-` or `|`) and searching for it.
+3. Candidates are filtered to exclude:
    - Same URI / same title as the current track
-   - Anything in the player's **last-10 history** (deduplicates by URI and by significant word overlap)
+   - Anything in the player's **last-10 autoplay history** (deduplicates by URI and by significant word overlap)
    - Non-music keywords (`tutorial`, `how to`, `radio concierto`, `live radio`, etc.)
 4. The first valid related track is added and played, and `_autoplayContext` is updated so the next round chains naturally.
 5. Manually adding a song with `/play` while autoplay is on **updates the autoplay context** to that new track, so future related searches branch from your latest pick.
+
+### Player buttons
+
+Every "Now playing" message ships with two rows of buttons that target the active player in the same guild:
+
+| Button | Action |
+|---|---|
+| ⏮️ Prev | Re-queue the previous track from the in-memory history (last 25) and skip back to it |
+| ⏯️ Pause / Resume | Toggle pause; the icon re-renders to reflect the live state |
+| ⏭️ Skip | Skip to the next track |
+| ⏹️ Stop | Stop, clear the queue, delete the persisted state file, and disconnect |
+| 🔀 Shuffle | Shuffle the upcoming queue |
+| 🔁 Loop | Cycle `none → track → queue`; the label updates to the current mode |
+| 📋 Queue | Show the current track + the next 10 upcoming |
+
+Buttons require you to be in the same voice channel as the bot. They never expire — Discord keeps them live as long as the message exists.
+
+### Queue persistence and `/resume`
+
+- Every 30 seconds, and on key state changes, the bot writes each active player's state (current track, queue, position, volume, voice channel, autoplay/loop/24-7 flags) to `state/<guildId>.json`.
+- When you run `/resume`:
+  - If a player exists and is paused, it unpauses.
+  - If no player exists but a state file is present, the bot reconnects to your current voice channel, recreates the player, restores the current track, seeks to the saved position (when > 5s) and re-enqueues the rest of the queue in the background.
+- `/stop` and the ⏹️ Stop button delete the state file. The state file is also auto-deleted after **7 days** of staleness on startup.
+
+### 24/7 mode
+
+`/247 on` sets a per-player flag that makes both auto-disconnect timers (empty-queue and empty-channel) skip that player. `/247 off` re-enables them. The flag is persisted with the rest of the state.
 
 ### Auto-disconnect timers
 
@@ -598,12 +630,19 @@ If everything is okay, you should see in the logs:
 | `/play <song>` | Plays a song, adds it to the queue, or queues a full **playlist** (search, track URL, or playlist URL) |
 | `/skip` | Skips to the next song |
 | `/pause` | Pauses playback |
-| `/resume` | Resumes playback |
-| `/stop` | Stops playback and clears the queue |
+| `/resume` | Resumes playback — or, if the bot was restarted, restores the persisted queue and position (see [Queue persistence and /resume](#queue-persistence-and-resume)) |
+| `/stop` | Stops playback, clears the queue, deletes the persisted state, and disconnects |
 | `/queue` | Shows the current playback queue |
+| `/nowplaying` | Shows the current track with a progress bar, position, length, volume, and flags |
+| `/seek <time>` | Jumps to a specific position. Accepts `mm:ss`, `hh:mm:ss`, `1h2m3s`, or raw seconds |
+| `/remove <position>` | Removes a specific track from the queue (position 1 = next track) |
+| `/clear` | Clears all upcoming tracks (the current song keeps playing) |
 | `/shuffle` | Shuffles the songs in the queue |
+| `/loop <mode>` | Loop mode: `none`, `track` (repeat current), or `queue` (repeat full queue) |
 | `/volume <0-100>` | Adjusts volume (0–100%) |
 | `/autoplay <on/off>` | Automatically plays related songs when the queue ends (see [Smart autoplay](#smart-autoplay)) |
+| `/247 <on/off>` | Toggles 24/7 mode — keeps the bot in voice even when alone or idle (see [24/7 mode](#247-mode)) |
+| `/status` | Shows bot, Discord, and Lavalink node status (WS ping, node states, uptime, memory, Node.js version) |
 
 ## 📖 Usage Guide
 
@@ -642,17 +681,25 @@ If everything is okay, you should see in the logs:
 
 ```
 Discord-Music-Bot/
-├── commands/          # Bot slash commands
+├── commands/          # Bot slash commands (auto-discovered by deploy-commands.js)
 │   ├── play.js
 │   ├── skip.js
 │   ├── pause.js
 │   ├── resume.js
 │   ├── stop.js
 │   ├── queue.js
+│   ├── nowplaying.js
+│   ├── seek.js
+│   ├── remove.js
+│   ├── clear.js
 │   ├── shuffle.js
+│   ├── loop.js
 │   ├── volume.js
-│   └── autoplay.js
-├── index.js           # Main bot file (multi-node Lavalink + event handlers)
+│   ├── autoplay.js
+│   ├── 247.js
+│   └── status.js
+├── state/             # Per-guild persisted player state (queue, position, flags) — gitignored, auto-created
+├── index.js           # Main bot file (multi-node Lavalink, persistence, button handler, event wiring)
 ├── deploy-commands.js # Script to register slash commands on Discord
 ├── setup.js           # Initial configuration verification script
 ├── package.json       # Dependencies and scripts
@@ -708,7 +755,8 @@ Discord-Music-Bot/
 - Port 443 requires `LAVALINK_SECURE=true`
 - The `.env` should NOT be uploaded to GitHub (it's in `.gitignore`)
 - The `.env` MUST be uploaded to Wispbyte manually
-- The bot auto-disconnects after **1 hour** of inactivity or **1 hour** alone in the voice channel
+- The bot auto-disconnects after **1 hour** of inactivity or **1 hour** alone in the voice channel (skipped while `/247` is on)
+- The `state/` directory is created automatically on startup and is gitignored — it stores per-guild queue/position so `/resume` can recover after a restart (entries older than 7 days are cleaned up on boot)
 - If you have a leftover `env` file (no dot) in the project root, it's safe to delete — it's a legacy artifact and is already ignored by Git
 
 ---
