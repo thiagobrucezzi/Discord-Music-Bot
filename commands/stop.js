@@ -1,10 +1,16 @@
 import { SlashCommandBuilder, EmbedBuilder } from 'discord.js';
+import { unlinkSync, existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 export default {
     data: new SlashCommandBuilder()
         .setName('stop')
-        .setDescription('Stops playback and clears queue'),
-    
+        .setDescription('Stops playback, clears queue, and forgets the saved session'),
+
     async execute(interaction, kazagumo) {
         const player = kazagumo.players.get(interaction.guild.id);
 
@@ -17,6 +23,14 @@ export default {
 
         if (!voiceChannel || player.voiceId !== voiceChannel.id) {
             return interaction.reply('❌ You must be in the same voice channel as the bot!');
+        }
+
+        // Delete the persisted state — explicit /stop means "don't /resume me later"
+        try {
+            const statePath = join(__dirname, '..', 'state', `${interaction.guild.id}.json`);
+            if (existsSync(statePath)) unlinkSync(statePath);
+        } catch (err) {
+            console.error('Error deleting state file:', err);
         }
 
         try {

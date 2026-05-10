@@ -1,8 +1,8 @@
-import { Client, GatewayIntentBits, Collection, EmbedBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, Collection, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { Shoukaku, Connectors } from 'shoukaku';
 import { Kazagumo } from 'kazagumo';
 import { config } from 'dotenv';
-import { readdirSync } from 'fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -10,6 +10,110 @@ config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// ─── Per-guild persisted state (for /resume across restarts) ────────────────
+// Each guild's player state lives at state/<guildId>.json. We snapshot enough
+// to recreate the player and continue from approximately the last position.
+const STATE_DIR = join(__dirname, 'state');
+const STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+try { mkdirSync(STATE_DIR, { recursive: true }); } catch (e) { /* exists */ }
+
+function statePath(guildId) {
+    return join(STATE_DIR, `${guildId}.json`);
+}
+
+function saveGuildState(player) {
+    if (!player || !player.guildId) return;
+    try {
+        const current = player.queue.current;
+        const queue = [...player.queue].map(t => ({
+            uri: t.uri,
+            title: t.title,
+            requesterId: t.requester?.id ?? null
+        }));
+        const data = {
+            guildId: player.guildId,
+            voiceId: player.voiceId,
+            textId: player.textId,
+            volume: player.volume ?? 100,
+            autoplay: Boolean(player._autoplay),
+            loop: player._loopMode || 'none',
+            twentyFourSeven: Boolean(player._twentyFourSeven),
+            current: current ? {
+                uri: current.uri,
+                title: current.title,
+                position: typeof player.position === 'number' ? player.position : 0,
+                requesterId: current.requester?.id ?? null
+            } : null,
+            queue,
+            savedAt: Date.now()
+        };
+        writeFileSync(statePath(player.guildId), JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err) {
+        console.error(`💾 Failed to save state for guild ${player.guildId}:`, err.message);
+    }
+}
+
+function loadGuildState(guildId) {
+    try {
+        const p = statePath(guildId);
+        if (!existsSync(p)) return null;
+        return JSON.parse(readFileSync(p, 'utf-8'));
+    } catch (err) {
+        console.error(`💾 Failed to load state for guild ${guildId}:`, err.message);
+        return null;
+    }
+}
+
+function deleteGuildState(guildId) {
+    try {
+        const p = statePath(guildId);
+        if (existsSync(p)) unlinkSync(p);
+    } catch (err) {
+        console.error(`💾 Failed to delete state for guild ${guildId}:`, err.message);
+    }
+}
+
+function cleanupOldStates() {
+    try {
+        const files = readdirSync(STATE_DIR).filter(f => f.endsWith('.json'));
+        const now = Date.now();
+        let removed = 0;
+        for (const f of files) {
+            const fp = join(STATE_DIR, f);
+            try {
+                const age = now - statSync(fp).mtimeMs;
+                if (age > STATE_MAX_AGE_MS) {
+                    unlinkSync(fp);
+                    removed += 1;
+                }
+            } catch (e) { /* ignore */ }
+        }
+        if (removed > 0) console.log(`💾 Cleaned up ${removed} stale state file(s)`);
+    } catch (err) { /* state dir doesn't exist or unreadable */ }
+}
+cleanupOldStates();
+
+// ─── Player UI buttons ──────────────────────────────────────────────────────
+// Two rows because Discord caps each ActionRow at 5 buttons.
+function buildPlayerActionRow(player) {
+    const isPaused = Boolean(player?.paused);
+    const loopMode = player?._loopMode || 'none';
+    const loopEmoji = loopMode === 'track' ? '🔂' : loopMode === 'queue' ? '🔁' : '➡️';
+
+    const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('music_prev').setEmoji('⏮️').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('music_pause').setEmoji(isPaused ? '▶️' : '⏸️').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('music_skip').setEmoji('⏭️').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('music_stop').setEmoji('⏹️').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('music_shuffle').setEmoji('🔀').setStyle(ButtonStyle.Secondary)
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('music_loop').setEmoji(loopEmoji).setLabel(`Loop: ${loopMode}`).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('music_queue').setEmoji('📋').setLabel('Queue').setStyle(ButtonStyle.Secondary)
+    );
+    return [row1, row2];
+}
 
 // Create Discord client
 const client = new Client({
@@ -343,164 +447,128 @@ kazagumo.shoukaku.on('debug', (name, info) => {
     }
 });
 
-// Helper function to search and play related songs for autoplay
+// Helper: extract YouTube videoId from a track's URI (returns null if not YT)
+function extractYouTubeId(uri) {
+    if (!uri || typeof uri !== 'string') return null;
+    // youtube.com/watch?v=ID, youtu.be/ID, youtube.com/embed/ID, youtube.com/shorts/ID
+    const m = uri.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+    return m ? m[1] : null;
+}
+
+// Helper: search related songs for autoplay.
+// Strategy:
+//   1) If current track is YouTube → use YouTube Mix URL (RD<videoId>) which returns
+//      a YouTube-curated radio playlist of similar songs. This is what powers the
+//      "Radio based on X" feature in YouTube Music.
+//   2) Otherwise fall back to a search by extracted artist name.
+// Filters tracks already in the autoplay history to avoid loops.
 async function searchAndPlayRelatedSong(player, kazagumo, client, guild) {
-    // Use autoplay context if available, otherwise use current track
     const contextTrack = player._autoplayContext || player.queue.current;
-    
     if (!contextTrack) {
         console.warn(`   └─ ⚠️ No context track available for autoplay`);
         return false;
     }
-    
-    // Initialize autoplay history if it doesn't exist
-    if (!player._autoplayHistory) {
-        player._autoplayHistory = [];
-    }
-    
-    console.log(`   └─ 🔄 Autoplay enabled, searching for related songs...`);
-    console.log(`   └─ Using context: ${contextTrack.title}`);
-    
+    if (!player._autoplayHistory) player._autoplayHistory = [];
+
+    console.log(`   └─ 🔄 Autoplay searching from context: ${contextTrack.title}`);
+
+    let candidates = [];
     try {
-        // Extract artist name from track title for better search
-        // Format is usually "Artist - Song" or "Artist | Song"
-        let searchQuery = contextTrack.title;
-        
-        // Try to extract artist name
-        const artistMatch = contextTrack.title.match(/^([^-|]+)/);
-        if (artistMatch) {
-            const artistName = artistMatch[1].trim();
-            // Use artist name for better music-focused results
-            searchQuery = artistName;
-            console.log(`   └─ Extracted artist: ${artistName}`);
-        } else {
-            // Fallback to radio mode
-            searchQuery = `radio ${contextTrack.title}`;
+        const ytId = extractYouTubeId(contextTrack.uri);
+        if (ytId) {
+            const mixUrl = `https://www.youtube.com/watch?v=${ytId}&list=RD${ytId}`;
+            console.log(`   └─ Using YouTube Mix: ${mixUrl}`);
+            const result = await kazagumo.search(mixUrl, { requester: client.user });
+            if (result?.tracks?.length) candidates = result.tracks;
+            else console.warn(`   └─ Mix returned no tracks, falling back to artist search`);
         }
-        
-        console.log(`   └─ Searching: ${searchQuery}`);
-        
-        const result = await kazagumo.search(searchQuery, {
-            requester: client.user
-        });
 
-        if (result.tracks && result.tracks.length > 0) {
-            // Filter out tracks that are duplicates, in history, or not music-related
-            const relatedTracks = result.tracks.filter(track => {
-                // Exclude if same URI
-                if (track.uri === contextTrack.uri || 
-                    (player.queue.current && track.uri === player.queue.current.uri)) {
-                    return false;
-                }
-                
-                // Exclude if same title (case insensitive)
-                const trackTitleLower = track.title.toLowerCase();
-                const contextTitleLower = contextTrack.title.toLowerCase();
-                if (trackTitleLower === contextTitleLower) {
-                    return false;
-                }
-                
-                // Exclude non-music content (tutorials, guides, radio streams, etc.)
-                const nonMusicKeywords = [
-                    'how to', 'tutorial', 'guide', 'tips', 'tricks',
-                    'radio concierto', 'emisión en directo', 'live radio',
-                    'internet radio', 'licensing', 'keyfob', 'volvo',
-                    'things you didn\'t know', 'cassette - radio'
-                ];
-                const isNonMusic = nonMusicKeywords.some(keyword => 
-                    trackTitleLower.includes(keyword)
-                );
-                if (isNonMusic) {
-                    return false;
-                }
-                
-                // Exclude if in history (check URI and similar titles)
-                const inHistory = player._autoplayHistory.some(historyTrack => {
-                    if (historyTrack.uri === track.uri) return true;
-                    // Check if titles are very similar (same artist/session)
-                    const historyTitleLower = historyTrack.title.toLowerCase();
-                    // If titles share significant words, consider them duplicates
-                    const trackWords = trackTitleLower.split(/\s+/).filter(w => w.length > 3);
-                    const historyWords = historyTitleLower.split(/\s+/).filter(w => w.length > 3);
-                    const commonWords = trackWords.filter(w => historyWords.includes(w));
-                    // If more than 2 significant words match, likely same song
-                    if (commonWords.length >= 2) return true;
-                    return false;
-                });
-                
-                return !inHistory;
-            });
+        if (candidates.length === 0) {
+            // Fallback: artist-name search
+            const artistMatch = contextTrack.title.match(/^([^-|]+)/);
+            const searchQuery = artistMatch ? artistMatch[1].trim() : `radio ${contextTrack.title}`;
+            console.log(`   └─ Fallback search: ${searchQuery}`);
+            const result = await kazagumo.search(searchQuery, { requester: client.user });
+            if (result?.tracks?.length) candidates = result.tracks;
+        }
 
-            if (relatedTracks.length > 0) {
-                // Take the first related track
-                const relatedTrack = relatedTracks[0];
-                console.log(`   └─ ✅ Found related song: ${relatedTrack.title}`);
-                
-                // Add to history (keep last 10 songs)
-                player._autoplayHistory.push(relatedTrack);
-                if (player._autoplayHistory.length > 10) {
-                    player._autoplayHistory.shift(); // Remove oldest
-                }
-                
-                // Update autoplay context to the new track
-                player._autoplayContext = relatedTrack;
-                
-                // Check if queue is empty before adding
-                const wasQueueEmpty = player.queue.length === 0;
-                
-                // Add to queue
-                await player.queue.add(relatedTrack);
-                
-                // If queue was empty, we need to advance to the new track
-                if (wasQueueEmpty && player.queue.current) {
-                    await player.skip();
-                    await new Promise(resolve => setTimeout(resolve, 300));
-                }
-                
-                // Play the track
-                if (!player.playing) {
-                    await player.play();
-                    await new Promise(resolve => setTimeout(resolve, 300));
-                }
-                
-                // Send notification
-                if (player.textId) {
-                    const channel = guild.channels.cache.get(player.textId);
-                    if (channel) {
-                        const embed = new EmbedBuilder()
-                            .setColor(0x5865F2)
-                            .setTitle('🔄 Autoplay')
-                            .setDescription(`**Playing related song:**\n[${relatedTrack.title}](${relatedTrack.uri})`)
-                            .addFields(
-                                { name: '⏱️ Duration', value: relatedTrack.length > 0 ? formatTime(relatedTrack.length) : 'Live', inline: true }
-                            )
-                            .setThumbnail(relatedTrack.thumbnail || null)
-                            .setTimestamp();
-                        
-                        try {
-                            await channel.send({ embeds: [embed] });
-                            console.log(`   └─ ✅ Autoplay: Playing ${relatedTrack.title}`);
-                        } catch (error) {
-                            console.error('Error sending autoplay notification:', error);
-                        }
-                    }
-                }
-                return true;
-            } else {
-                console.warn(`   └─ ⚠️ No different related songs found`);
-                return false;
-            }
-        } else {
-            console.warn(`   └─ ⚠️ No related songs found`);
+        if (candidates.length === 0) {
+            console.warn(`   └─ ⚠️ No autoplay candidates found`);
             return false;
         }
-    } catch (autoplayError) {
-        console.error('Error in autoplay search:', autoplayError);
+
+        // Filter: not the same as context, not already in history, not blacklisted
+        const NON_MUSIC = ['how to', 'tutorial', 'guide', 'tips', 'tricks',
+            'radio concierto', 'emisión en directo', 'live radio',
+            'internet radio', 'licensing'];
+        const historyUris = new Set(player._autoplayHistory.map(t => t.uri));
+        const filtered = candidates.filter(t => {
+            if (!t.uri || t.uri === contextTrack.uri) return false;
+            if (historyUris.has(t.uri)) return false;
+            const lower = (t.title || '').toLowerCase();
+            if (NON_MUSIC.some(k => lower.includes(k))) return false;
+            return true;
+        });
+
+        if (filtered.length === 0) {
+            console.warn(`   └─ ⚠️ All autoplay candidates filtered out`);
+            return false;
+        }
+
+        const next = filtered[0];
+        console.log(`   └─ ✅ Autoplay picked: ${next.title}`);
+
+        player._autoplayHistory.push(next);
+        if (player._autoplayHistory.length > 30) player._autoplayHistory.shift();
+        player._autoplayContext = next;
+
+        const wasQueueEmpty = player.queue.length === 0 && !player.queue.current;
+        await player.queue.add(next);
+
+        if (wasQueueEmpty && !player.playing) {
+            await player.play();
+            await new Promise(r => setTimeout(r, 300));
+        }
+        return true;
+    } catch (err) {
+        console.error('Error in autoplay search:', err);
         return false;
     }
 }
 
-// Handle when a track ends
+// Handle when a new track starts playing.
+// We post the "Now playing" embed + control buttons here so it fires consistently
+// for all start paths (manual /play, queue advance, autoplay, /resume restore, prev).
+kazagumo.on('playerStart', async (player, track) => {
+    try {
+        const guild = client.guilds.cache.get(player.guildId);
+        if (!guild) return;
+
+        if (player.textId) {
+            const channel = guild.channels.cache.get(player.textId);
+            if (channel) {
+                const embed = new EmbedBuilder()
+                    .setColor(0x5865F2)
+                    .setTitle('🎵 Now playing')
+                    .setDescription(`**[${track.title}](${track.uri})**`)
+                    .addFields(
+                        { name: '👤 Requested by', value: track.requester ? `${track.requester}` : 'Autoplay', inline: true },
+                        { name: '⏱️ Duration', value: track.length > 0 ? formatTime(track.length) : 'Live', inline: true }
+                    )
+                    .setThumbnail(track.thumbnail || null)
+                    .setTimestamp();
+                await channel.send({ embeds: [embed], components: buildPlayerActionRow(player) })
+                    .catch(err => console.error('Error sending now playing:', err));
+            }
+        }
+
+        saveGuildState(player);
+    } catch (err) {
+        console.error('Error in playerStart handler:', err);
+    }
+});
+
+// Handle when a track ends.
 // NOTE: Kazagumo automatically advances the queue and calls play() internally after
 // this event fires. We must NOT call player.skip() or player.play() here for queue
 // advancement — that would stop the track Kazagumo just started.
@@ -512,33 +580,19 @@ kazagumo.on('playerEnd', async (player) => {
             return;
         }
 
-        const queueLength = player.queue.length;
         const endedTrack = player.queue.current;
-
+        const queueLength = player.queue.length;
         console.log(`🎵 Track ended | Guild: ${player.guildId} | Queue remaining: ${queueLength} | Was: ${endedTrack?.title}`);
 
-        if (queueLength > 0) {
-            // Kazagumo already plays the next track automatically.
-            // Wait briefly for it to advance, then send a "now playing" notification.
-            await new Promise(resolve => setTimeout(resolve, 400));
-            const nextTrack = player.queue.current;
-            if (nextTrack && player.textId) {
-                const channel = guild.channels.cache.get(player.textId);
-                if (channel) {
-                    const embed = new EmbedBuilder()
-                        .setColor(0x5865F2)
-                        .setTitle('🎵 Now playing')
-                        .setDescription(`**[${nextTrack.title}](${nextTrack.uri})**`)
-                        .addFields(
-                            { name: '👤 Requested by', value: `${nextTrack.requester}`, inline: true },
-                            { name: '⏱️ Duration', value: nextTrack.length > 0 ? formatTime(nextTrack.length) : 'Live', inline: true }
-                        )
-                        .setThumbnail(nextTrack.thumbnail || null)
-                        .setTimestamp();
-                    await channel.send({ embeds: [embed] }).catch(err => console.error('Error sending now playing:', err));
-                }
-            }
-        } else {
+        // Push to history (used by Previous button), unless we just navigated back
+        if (endedTrack && !player._suppressHistoryPush) {
+            if (!player._history) player._history = [];
+            player._history.push(endedTrack);
+            if (player._history.length > 25) player._history.shift();
+        }
+        player._suppressHistoryPush = false;
+
+        if (queueLength === 0) {
             // Queue is empty — handle autoplay or schedule disconnect
             if (player._autoplay) {
                 const success = await searchAndPlayRelatedSong(player, kazagumo, client, guild);
@@ -550,18 +604,22 @@ kazagumo.on('playerEnd', async (player) => {
                 scheduleDisconnect(player, kazagumo);
             }
         }
+
+        saveGuildState(player);
     } catch (error) {
         console.error('Error in playerEnd handler:', error);
     }
 });
 
 function scheduleDisconnect(player, kazagumo) {
+    // 24/7 mode: never auto-disconnect on idle queue
+    if (player._twentyFourSeven) return;
     // If there's already an empty-channel timer running for this guild, skip — it will handle cleanup
     if (emptyChannelTimers.has(player.guildId)) return;
     setTimeout(async () => {
         try {
             const p = kazagumo.players.get(player.guildId);
-            if (p && !p.playing && p.queue.length === 0) await p.destroy();
+            if (p && !p._twentyFourSeven && !p.playing && p.queue.length === 0) await p.destroy();
         } catch (err) {
             console.error('Error destroying inactive player:', err);
         }
@@ -601,14 +659,16 @@ const emptyChannelTimers = new Map();
 
 function scheduleEmptyChannelDisconnect(guildId) {
     if (emptyChannelTimers.has(guildId)) return; // already scheduled
+    const player = kazagumo.players.get(guildId);
+    if (player?._twentyFourSeven) return; // 24/7 mode: stay even if alone
     console.log(`🔇 Voice channel empty in guild ${guildId}, disconnecting in 1 hour`);
     const timer = setTimeout(async () => {
         emptyChannelTimers.delete(guildId);
-        const player = kazagumo.players.get(guildId);
-        if (!player) return;
+        const p = kazagumo.players.get(guildId);
+        if (!p || p._twentyFourSeven) return;
         try {
-            player.queue.clear();
-            await player.destroy();
+            p.queue.clear();
+            await p.destroy();
             console.log(`🔇 Disconnected from empty channel in guild ${guildId} after 1 hour`);
         } catch (err) {
             console.error('Error disconnecting from empty channel:', err);
@@ -616,6 +676,14 @@ function scheduleEmptyChannelDisconnect(guildId) {
     }, 3600000); // 1 hour
     emptyChannelTimers.set(guildId, timer);
 }
+
+// Periodically snapshot player state so /resume can pick up where we left off
+// even after a host-side restart. Runs every 30 seconds.
+setInterval(() => {
+    for (const player of kazagumo.players.values()) {
+        if (player.playing || player.paused) saveGuildState(player);
+    }
+}, 30000);
 
 function cancelEmptyChannelDisconnect(guildId) {
     const timer = emptyChannelTimers.get(guildId);
@@ -710,26 +778,138 @@ client.once('clientReady', () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const command = client.commands.get(interaction.commandName);
-    if (!command) return;
-
-    try {
-        await command.execute(interaction, kazagumo);
-    } catch (error) {
-        console.error('Error executing command:', error);
-        const reply = { 
-            content: '❌ There was an error executing this command!', 
-            flags: 64 // Ephemeral flag (MessageFlags.Ephemeral = 64)
-        };
-        if (interaction.replied || interaction.deferred) {
-            await interaction.followUp(reply);
-        } else {
-            await interaction.reply(reply);
+    // Slash commands
+    if (interaction.isChatInputCommand()) {
+        const command = client.commands.get(interaction.commandName);
+        if (!command) return;
+        try {
+            await command.execute(interaction, kazagumo);
+        } catch (error) {
+            console.error('Error executing command:', error);
+            const reply = {
+                content: '❌ There was an error executing this command!',
+                flags: 64
+            };
+            if (interaction.replied || interaction.deferred) await interaction.followUp(reply);
+            else await interaction.reply(reply);
         }
+        return;
+    }
+
+    // Music control buttons
+    if (interaction.isButton() && interaction.customId.startsWith('music_')) {
+        await handleMusicButton(interaction).catch(err => console.error('Button handler error:', err));
     }
 });
+
+// Button handler: shares the same voice-channel validations as slash commands.
+async function handleMusicButton(interaction) {
+    const player = kazagumo.players.get(interaction.guild.id);
+    if (!player) {
+        return interaction.reply({ content: '❌ No music is currently playing!', flags: 64 });
+    }
+    const voiceChannel = interaction.member?.voice?.channel;
+    if (!voiceChannel || player.voiceId !== voiceChannel.id) {
+        return interaction.reply({ content: '❌ You must be in the same voice channel as the bot!', flags: 64 });
+    }
+
+    const id = interaction.customId;
+    try {
+        switch (id) {
+            case 'music_pause': {
+                if (player.paused) {
+                    await player.pause(false);
+                    await interaction.reply({ content: '▶️ Resumed', flags: 64 });
+                } else {
+                    await player.pause(true);
+                    await interaction.reply({ content: '⏸️ Paused', flags: 64 });
+                }
+                saveGuildState(player);
+                interaction.message?.edit({ components: buildPlayerActionRow(player) }).catch(() => {});
+                break;
+            }
+            case 'music_skip': {
+                const current = player.queue.current;
+                await player.skip();
+                await interaction.reply({ content: `⏭️ Skipped: **${current?.title ?? 'Unknown'}**`, flags: 64 });
+                break;
+            }
+            case 'music_prev': {
+                const history = player._history || [];
+                if (history.length === 0) {
+                    return interaction.reply({ content: '❌ No previous track in history!', flags: 64 });
+                }
+                const prev = history.pop();
+                const current = player.queue.current;
+                // Re-queue: prev → current → rest_of_queue, then skip
+                if (current) player.queue.unshift(current);
+                player.queue.unshift(prev);
+                player._suppressHistoryPush = true; // current goes back to queue, not history
+                await player.skip();
+                await interaction.reply({ content: `⏮️ Going back to: **${prev.title}**`, flags: 64 });
+                break;
+            }
+            case 'music_shuffle': {
+                if (player.queue.length === 0) {
+                    return interaction.reply({ content: '❌ Queue is empty, nothing to shuffle!', flags: 64 });
+                }
+                if (typeof player.queue.shuffle === 'function') {
+                    player.queue.shuffle();
+                } else {
+                    for (let i = player.queue.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [player.queue[i], player.queue[j]] = [player.queue[j], player.queue[i]];
+                    }
+                }
+                saveGuildState(player);
+                await interaction.reply({ content: `🔀 Queue shuffled (${player.queue.length} tracks)`, flags: 64 });
+                break;
+            }
+            case 'music_loop': {
+                const order = ['none', 'track', 'queue'];
+                const cur = player._loopMode || 'none';
+                const next = order[(order.indexOf(cur) + 1) % order.length];
+                player._loopMode = next;
+                if (typeof player.setLoop === 'function') {
+                    try { player.setLoop(next); } catch (e) { /* shouldn't fail */ }
+                }
+                saveGuildState(player);
+                await interaction.reply({ content: `🔁 Loop mode: **${next}**`, flags: 64 });
+                interaction.message?.edit({ components: buildPlayerActionRow(player) }).catch(() => {});
+                break;
+            }
+            case 'music_stop': {
+                deleteGuildState(player.guildId);
+                player.queue.clear();
+                await player.destroy();
+                await interaction.reply({ content: '⏹️ Stopped and disconnected.', flags: 64 });
+                break;
+            }
+            case 'music_queue': {
+                const current = player.queue.current;
+                const upcoming = [...player.queue].slice(0, 10);
+                const embed = new EmbedBuilder()
+                    .setColor(0x5865F2)
+                    .setTitle('📋 Queue')
+                    .setDescription(current ? `**Now playing:** [${current.title}](${current.uri})` : 'Nothing playing')
+                    .setTimestamp();
+                if (upcoming.length > 0) {
+                    const list = upcoming.map((t, i) => `**${i + 1}.** [${t.title}](${t.uri})`).join('\n');
+                    embed.addFields({ name: `Upcoming (${player.queue.length} total)`, value: list.length > 1024 ? list.slice(0, 1021) + '...' : list });
+                }
+                await interaction.reply({ embeds: [embed], flags: 64 });
+                break;
+            }
+            default:
+                await interaction.reply({ content: '❌ Unknown button.', flags: 64 });
+        }
+    } catch (err) {
+        console.error(`Button ${id} failed:`, err);
+        const reply = { content: '❌ Action failed.', flags: 64 };
+        if (interaction.replied || interaction.deferred) await interaction.followUp(reply).catch(() => {});
+        else await interaction.reply(reply).catch(() => {});
+    }
+}
 
 // Improved error handling for hosting
 process.on('unhandledRejection', (error, promise) => {

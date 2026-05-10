@@ -199,11 +199,13 @@ export default {
                     );
             }
 
+            // If nothing was playing, kick off playback. The "Now playing" message
+            // is sent by the playerStart event handler in index.js (with control
+            // buttons), so we don't duplicate it here.
             if (!player.playing && !player.paused) {
                 try {
                     console.log(`   └─ Starting playback: ${track.title}`);
                     await player.play();
-                    if (!isPlaylist) embed.setDescription(`🎵 **Now playing:** [${track.title}](${track.uri})`);
                     console.log(`   └─ ✅ Now playing: ${track.title}`);
                 } catch (playError) {
                     console.error(`   └─ ❌ Error starting playback:`, playError);

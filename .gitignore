@@ -31,5 +31,8 @@ Thumbs.db
 # Claude Code memory/session data
 .claude/
 
+# Per-guild persisted player state (queue/position for /resume)
+state/
+
 # Old env file (without dot)
 env
