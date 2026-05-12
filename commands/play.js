@@ -24,21 +24,15 @@ export default {
             return interaction.editReply('❌ You must be in a voice channel to use this command!');
         }
 
-        // Helper: destroy stale player (session expired after node restart)
-        async function destroyStalePlayer() {
-            const stale = kazagumo.players.get(interaction.guild.id);
-            if (stale) {
-                try { await stale.destroy(); } catch (e) { /* ignore */ }
-            }
-            try {
-                if (kazagumo.shoukaku.connections.has(interaction.guild.id)) {
-                    kazagumo.shoukaku.connections.get(interaction.guild.id).disconnect();
-                    kazagumo.shoukaku.connections.delete(interaction.guild.id);
-                }
-            } catch (e) { /* ignore */ }
-        }
+        // Use the shared cleanup helper from index.js (wipes kazagumo + shoukaku
+        // map entries even when destroy() throws partway through).
+        const cleanup = (gid) => kazagumo._forceCleanupPlayer
+            ? kazagumo._forceCleanupPlayer(gid)
+            : Promise.resolve();
 
         let _retried = false;
+        const skipNodes = new Set(); // nodes that returned stale-session 404 this attempt
+        let _lastUsedNode = null;
         const attemptPlay = async () => {
         try {
             // Check if player already exists for this guild
@@ -52,29 +46,21 @@ export default {
             if (player) {
                 // Check if bot is actually connected to a voice channel
                 if (!botVoiceChannel) {
-                    // Bot is not in any channel, but player exists - destroy it
-                    console.log('Bot not in voice channel but player exists, destroying player');
-                    try {
-                        await player.destroy();
-                        player = null;
-                    } catch (destroyError) {
-                        console.error('Error destroying disconnected player:', destroyError);
-                        player = null;
-                    }
+                    // Bot is not in any channel, but player exists - wipe it.
+                    // forceCleanupPlayer handles the case where player.destroy() throws
+                    // (stuck DESTROYING state from a prior network failure).
+                    console.log('Bot not in voice channel but player exists, cleaning up');
+                    await cleanup(interaction.guild.id);
+                    player = null;
                 } else if (player.voiceId !== voiceChannel.id) {
                     // Player exists but is in different channel - move it
                     try {
                         await player.setVoiceChannel(voiceChannel.id);
                     } catch (error) {
                         console.error('Error moving player to new channel:', error);
-                        // If move fails, destroy old player and create new one
-                        try {
-                            await player.destroy();
-                            player = null;
-                        } catch (destroyError) {
-                            console.error('Error destroying old player:', destroyError);
-                            player = null;
-                        }
+                        // If move fails, wipe old player and create new one
+                        await cleanup(interaction.guild.id);
+                        player = null;
                     }
                 }
                 
@@ -88,12 +74,14 @@ export default {
             if (!player) {
                 const triedNodes = new Set();
 
-                // Build ordered list: all connected nodes first, then iterate all of them
+                // Build ordered list: all connected nodes first, then iterate all of them.
+                // skipNodes excludes nodes that returned a stale-session 404 earlier
+                // this attempt (so we don't redial the same broken node).
                 const allNodes = [...kazagumo.shoukaku.nodes.values()];
-                const connectedNodes = allNodes.filter(n => n.state === 1);
+                const connectedNodes = allNodes.filter(n => n.state === 1 && !skipNodes.has(n.name));
 
-                console.log(`   └─ Nodes available: ${allNodes.length} total, ${connectedNodes.length} connected`);
-                allNodes.forEach(n => console.log(`      • ${n.name} state=${n.state}`));
+                console.log(`   └─ Nodes available: ${allNodes.length} total, ${connectedNodes.length} connected${skipNodes.size ? ` (skipping ${skipNodes.size} stale)` : ''}`);
+                allNodes.forEach(n => console.log(`      • ${n.name} state=${n.state}${skipNodes.has(n.name) ? ' [skipped: stale]' : ''}`));
 
                 if (connectedNodes.length === 0) {
                     console.warn(`   └─ No connected nodes at all`);
@@ -116,23 +104,12 @@ export default {
 
                         console.log(`   └─ Trying node: ${node.name} (${triedNodes.size}/${connectedNodes.length})`);
                         player = await kazagumo.createPlayer(playerOptions);
+                        _lastUsedNode = node.name;
                         console.log(`   └─ ✅ Connected via node: ${node.name}`);
                         break; // success
                     } catch (createError) {
                         console.error(`   └─ ❌ Node ${node.name} failed: ${createError.message}`);
-
-                        // Clean up partial player/connection state before retrying
-                        try {
-                            const stale = kazagumo.players.get(interaction.guild.id);
-                            if (stale) await stale.destroy();
-                        } catch (e) { /* ignore */ }
-                        try {
-                            if (kazagumo.shoukaku.connections.has(interaction.guild.id)) {
-                                kazagumo.shoukaku.connections.get(interaction.guild.id).disconnect();
-                                kazagumo.shoukaku.connections.delete(interaction.guild.id);
-                            }
-                        } catch (e) { /* ignore */ }
-
+                        await cleanup(interaction.guild.id);
                         await new Promise(r => setTimeout(r, 500));
                     }
                 }
@@ -143,14 +120,57 @@ export default {
                 }
             }
 
-            // Search for the track
-            console.log(`   └─ Searching for: ${query}`);
-            const result = await kazagumo.search(query, {
-                requester: interaction.user
+            // Track the player's node so the catch can recycle + skip it on retry.
+            _lastUsedNode = player?.shoukaku?.node?.name ?? _lastUsedNode;
+
+            // Parallel search across all connected nodes: hit them simultaneously
+            // and take the first one that returns non-empty tracks. A stalled node
+            // (primary can take 2+ minutes to return 0 results when its YT plugin
+            // is blocked) no longer poisons the wait — fast nodes win the race.
+            // Hard per-node timeout means even a fully hung node drops out after
+            // SEARCH_TIMEOUT_MS instead of hanging the entire user request.
+            const SEARCH_TIMEOUT_MS = 12000;
+            const connectedNodes = [...kazagumo.shoukaku.nodes.values()].filter(n => n.state === 1);
+            console.log(`   └─ Searching for: ${query} across ${connectedNodes.length} nodes in parallel`);
+
+            const searchOnNode = (nodeName) => new Promise((resolve) => {
+                const t = setTimeout(() => resolve({ node: nodeName, tracks: [], timedOut: true }), SEARCH_TIMEOUT_MS);
+                kazagumo.search(query, { requester: interaction.user, nodeName })
+                    .then(r => { clearTimeout(t); resolve({ node: nodeName, tracks: r?.tracks ?? [], type: r?.type, playlistName: r?.playlistName }); })
+                    .catch(err => { clearTimeout(t); resolve({ node: nodeName, tracks: [], error: err.message }); });
             });
 
+            // Promise.any rejects when every promise rejects. Wrap so empty/timeout
+            // counts as reject (we only want first NON-EMPTY winner).
+            let winner = null;
+            try {
+                winner = await Promise.any(connectedNodes.map(n =>
+                    searchOnNode(n.name).then(r => r.tracks.length ? r : Promise.reject(r))
+                ));
+            } catch (_) { /* all empty — fall through to scsearch */ }
+
+            let result = winner
+                ? { tracks: winner.tracks, type: winner.type, playlistName: winner.playlistName }
+                : { tracks: [] };
+            if (winner) console.log(`   └─ ✅ First-to-find: ${winner.node} → ${winner.tracks[0].title}`);
+
+            // Last resort for plain text queries: SoundCloud on the player's node.
+            const isUrl = /^https?:\/\//i.test(query);
+            if (!result.tracks.length && !isUrl) {
+                try {
+                    console.log(`   └─ 🔄 SoundCloud fallback: scsearch:${query}`);
+                    const sc = await player.search(`scsearch:${query}`, { requester: interaction.user });
+                    if (sc?.tracks?.length) {
+                        console.log(`   └─ ✅ SoundCloud hit: ${sc.tracks[0].title}`);
+                        result = sc;
+                    }
+                } catch (err) {
+                    console.warn(`   └─ SoundCloud fallback failed: ${err.message}`);
+                }
+            }
+
             if (!result.tracks.length) {
-                console.log(`   └─ ❌ No results found`);
+                console.log(`   └─ ❌ No results found (tried all nodes in parallel + scsearch)`);
                 return interaction.editReply('❌ No results found for your search!');
             }
 
@@ -218,14 +238,25 @@ export default {
         } catch (error) {
             console.error('Error in play:', error);
 
-            // Session expired after Lavalink node restart — destroy stale player and retry once
+            // Session expired after Lavalink node restart — destroy stale player and retry once.
+            // Heuristic: 404 from a /v4/sessions/.../players path = the node's session ID
+            // is stale on the Lavalink side. The fix is to (a) skip that node for the
+            // retry so we pick a different one, and (b) recycle it so it gets a fresh
+            // session for future requests.
+            const errPath = String(error?.path ?? '');
             const isSessionError = error.status === 404 ||
                 error.message?.includes('Session not found') ||
-                error.message?.includes('session');
+                /\/v4\/sessions\/[^/]+\/players/.test(errPath);
             if (isSessionError && !_retried) {
                 _retried = true;
-                console.warn('   └─ 🔄 Stale session detected, destroying player and retrying...');
-                await destroyStalePlayer();
+                console.warn('   └─ 🔄 Stale session detected, cleaning up and retrying on a different node...');
+                if (_lastUsedNode) {
+                    skipNodes.add(_lastUsedNode);
+                    if (typeof kazagumo._recycleNode === 'function') {
+                        kazagumo._recycleNode(_lastUsedNode);
+                    }
+                }
+                await cleanup(interaction.guild.id);
                 await new Promise(r => setTimeout(r, 800));
                 return attemptPlay();
             }

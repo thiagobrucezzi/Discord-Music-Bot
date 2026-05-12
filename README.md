@@ -15,8 +15,9 @@ Complete music bot for Discord using **Kazagumo**, **Shoukaku** and **Lavalink**
 - ✅ **Smart autoplay (YouTube Mix)** — when the queue ends, builds a YouTube Mix from the current track for context-aware recommendations, with an artist-name fallback if no mix is available
 - ✅ **`/status` command** — Discord WS ping, every Lavalink node's state/ping/players, uptime, RSS/heap memory, Node.js version, and the active node for the current guild
 - ✅ **Multi-node Lavalink failover** — auto-discovers public v4 nodes from a public API plus hardcoded fallbacks, and `/play` retries across every connected node until one accepts the player
+- ✅ **Parallel multi-node search** — every `/play` query hits every connected node in parallel (with a 12s per-node timeout); the first node to return results wins, so a single slow/broken node can't make you wait 2+ minutes. SoundCloud (`scsearch:`) is tried as a last resort if every YouTube node comes back empty
 - ✅ **Flapping-node detector** — nodes that disconnect 3 times within 5s (or proxy-close) are removed from the pool to prevent reconnect storms / 429 rate limits
-- ✅ **Stale-session recovery** — if a Lavalink node restarts mid-session, `/play` destroys the dead player and retries automatically
+- ✅ **Stale-session recovery** — if a Lavalink node returns `404` on `/v4/sessions/.../players` (its session ID expired after a restart), the bot skips that node for the retry, force-recycles its WebSocket so it gets a fresh session for next time, and falls back to a clean player on another node. Failed destroys are also force-cleaned from the in-memory map so a DNS blip can't leave a zombie player around
 - ✅ **Auto-disconnect** — leaves the channel after 1 hour if the queue is empty or no humans remain in the voice channel (skipped while 24/7 mode is on)
 - ✅ **Manual-disconnect cleanup** — if someone kicks the bot from the voice channel, the player is destroyed cleanly
 - ✅ Modern slash commands
@@ -253,9 +254,36 @@ Some public nodes "connect → close → reconnect" in a tight loop (often `prox
 
 You'll see logs like `Flap detected on serenetia-v4 (2/3, 1240ms after ready)` and eventually `🚫 Node X removed from pool after 3 flaps`.
 
+### Parallel multi-node search
+
+When you run `/play`, the bot doesn't search nodes one by one — it fans out a search to **every connected node in parallel** and takes the first one to return non-empty tracks. This matters because the public Lavalink YouTube plugin gets blocked by YouTube's anti-bot intermittently, and a "blocked" node doesn't error; it just returns 0 tracks (sometimes after a 2+ minute delay).
+
+- Each per-node search has a hard **12-second timeout** so a fully hung node drops out of the race instead of stalling the request.
+- The race is `Promise.any`-style: empty / timeout / error all count as "this node loses", first node with tracks wins.
+- If every YouTube node comes back empty, the bot tries **SoundCloud** (`scsearch:<query>`) on the player's node as a last resort — most public Lavalink v4 hosts ship lavaplayer's SoundCloud source.
+- Result: in practice, a healthy node responds in ~1 second, so even when the primary is wedged you see results in ~1s instead of waiting for the primary's timeout.
+
+The autoplay engine uses the same parallel-race logic for its YouTube Mix lookup and artist-name fallback, so a stuck node doesn't dry up autoplay either.
+
 ### Stale-session recovery
 
-If a Lavalink node restarts while the bot has an active session, the next `/play` would normally fail with `404 Session not found`. The play command catches this, destroys the dead player + voice connection, waits ~800ms, and retries once automatically.
+If a Lavalink node restarts (or its `sessionId` otherwise expires on the server side), the next REST call against it returns `404` on a path like `/v4/sessions/<id>/players`. When `/play` detects this:
+
+1. The offending node is **added to a per-attempt skip-list** so the retry picks a different node.
+2. The dead WebSocket is **force-recycled** (`node.disconnect(1000, 'session-stale-recycle')`) — Shoukaku reconnects it and Lavalink hands it a fresh session ID for future requests. `moveOnDisconnect:true` migrates any players hosted on it during the swap.
+3. The current player is wiped via `forceCleanupPlayer()` (see below) and the retry creates a fresh player on a healthy node.
+
+#### `forceCleanupPlayer`: the zombie-killer
+
+`KazagumoPlayer.destroy()` sets the player's state to `DESTROYING` **before** awaiting its REST calls. If the REST call throws (e.g. DNS `EAI_AGAIN` during a node hostname blip), the final `players.delete()` never runs and the player is stuck in `DESTROYING` forever — the next `/play` finds the zombie, can't destroy it again ("Player is already destroyed"), and every search after that fails because `kazagumo.search()` internally fans out `getPlayers()` to every connected node and one stale session 404s the whole `Promise.all`.
+
+To prevent this, `index.js` exposes `kazagumo._forceCleanupPlayer(guildId)` which **always** deletes the player + voice connection from the maps, even when destroy fails partway. It's wired into:
+
+- `scheduleDisconnect`'s 1-hour idle cleanup (the original trigger of the cascade)
+- `/play`'s "bot was kicked but player still exists" branch
+- The stale-session retry path
+
+`/play` also uses `player.search()` (which pins to a specific node) instead of the bare `kazagumo.search()` (which fans out across nodes), so a single stale session can never poison searches via the `getLeastUsedNode` path.
 
 ### Smart autoplay
 
@@ -739,6 +767,15 @@ Discord-Music-Bot/
 - ✅ Verify that Lavalink is connected (should see "✅ Lavalink lavalink: Connected!")
 - ✅ Make sure you're in a voice channel before using `/play`
 - ✅ Verify that the bot has permissions to connect to the channel
+
+### `/play` says "No results found" for a well-known artist
+
+The Lavalink YouTube plugin gets rate-limited or blocked by YouTube's anti-bot from time to time — when it happens, search returns 0 tracks instead of an error. The bot already mitigates this by racing the search across every connected node in parallel and falling back to SoundCloud (`scsearch:`), so you only see "No results found" when **every** connected node's YouTube source is blocked **and** SoundCloud has no match.
+
+If this keeps happening:
+- Try again in a few minutes — the public node pool refreshes hourly and a freshly-added node often has working YouTube.
+- Restart the bot to force-refresh the node pool.
+- Consider running a private Lavalink with the `youtube-source` plugin configured with OAuth, which is much more reliable than the lavaplayer default.
 
 ### Bot disconnected by itself
 

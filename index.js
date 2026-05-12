@@ -341,6 +341,55 @@ function scheduleEmergencyRefresh() {
 
 setInterval(() => refreshNodePool('scheduled'), REFRESH_INTERVAL_MS);
 
+// ─── Cleanup helpers shared with command handlers ───────────────────────────
+// KazagumoPlayer.destroy() sets state=DESTROYING *before* awaiting REST calls.
+// If the REST call throws (e.g. EAI_AGAIN during a node DNS blip), the
+// players.delete() at the end never runs, leaving a stuck DESTROYING entry
+// that breaks every subsequent /play with "Player is already destroyed".
+// This helper always wipes the kazagumo + shoukaku map entries, regardless.
+async function forceCleanupPlayer(guildId) {
+    const stale = kazagumo.players.get(guildId);
+    if (stale) {
+        try { await stale.destroy(); } catch (_) { /* ignore — we wipe state manually below */ }
+    }
+    kazagumo.players.delete(guildId);
+    try {
+        const conn = kazagumo.shoukaku.connections.get(guildId);
+        if (conn) {
+            conn.disconnect();
+            kazagumo.shoukaku.connections.delete(guildId);
+        }
+    } catch (_) { /* ignore */ }
+}
+kazagumo._forceCleanupPlayer = forceCleanupPlayer;
+
+// Force a node to disconnect+reconnect so it gets a fresh sessionId from
+// Lavalink. Used when a node's stored session has gone stale on the Lavalink
+// side (e.g. after the Lavalink process restarted) — symptom is REST 404
+// on /v4/sessions/<id>/players even though the WS is connected. The internal
+// reconnect loop will pick the node back up, and moveOnDisconnect=true moves
+// any players hosted on it to another node in the meantime.
+function recycleNode(name) {
+    const node = shoukaku.nodes.get(name);
+    if (!node) return;
+    // Skip if we already hard-killed it; that node is gone for good.
+    if (nodeFlapState.get(name)?.removed) return;
+    console.warn(`   └─ ♻️ Recycling node ${name} (stale session); forcing reconnect`);
+    try {
+        // Prefer Shoukaku's graceful disconnect — it sends a proper close frame
+        // and lets moveOnDisconnect:true migrate any players to another node.
+        // Internal reconnect loop will pick the node back up with a fresh sessionId.
+        if (typeof node.disconnect === 'function') {
+            node.disconnect(1000, 'session-stale-recycle');
+        } else if (node.ws && typeof node.ws.terminate === 'function') {
+            node.ws.terminate();
+        }
+    } catch (err) {
+        console.warn(`   └─ recycleNode ${name}: ${err.message}`);
+    }
+}
+kazagumo._recycleNode = recycleNode;
+
 // Commands collection
 client.commands = new Collection();
 
@@ -472,24 +521,58 @@ async function searchAndPlayRelatedSong(player, kazagumo, client, guild) {
 
     console.log(`   └─ 🔄 Autoplay searching from context: ${contextTrack.title}`);
 
+    // Parallel search across all connected nodes, take first non-empty result.
+    // Per-node timeout prevents one slow node from making the user wait minutes.
+    async function searchWithFallback(rawQuery, { allowScsearch }) {
+        const SEARCH_TIMEOUT_MS = 12000;
+        const connectedNodes = [...kazagumo.shoukaku.nodes.values()].filter(n => n.state === 1);
+
+        const searchOnNode = (nodeName) => new Promise((resolve) => {
+            const t = setTimeout(() => resolve({ node: nodeName, tracks: [] }), SEARCH_TIMEOUT_MS);
+            kazagumo.search(rawQuery, { requester: client.user, nodeName })
+                .then(r => { clearTimeout(t); resolve({ node: nodeName, tracks: r?.tracks ?? [] }); })
+                .catch(() => { clearTimeout(t); resolve({ node: nodeName, tracks: [] }); });
+        });
+
+        try {
+            const winner = await Promise.any(connectedNodes.map(n =>
+                searchOnNode(n.name).then(r => r.tracks.length ? r : Promise.reject(r))
+            ));
+            console.log(`   └─ 🔄 Autoplay first-to-find: ${winner.node}`);
+            return winner.tracks;
+        } catch (_) { /* all empty/timed out — fall through to scsearch */ }
+
+        if (allowScsearch && !/^https?:\/\//i.test(rawQuery)) {
+            try {
+                const sc = await player.search(`scsearch:${rawQuery}`, { requester: client.user });
+                if (sc?.tracks?.length) {
+                    console.log(`   └─ 🔄 Autoplay SoundCloud fallback hit`);
+                    return sc.tracks;
+                }
+            } catch (err) {
+                console.warn(`   └─ Autoplay SoundCloud fallback failed: ${err.message}`);
+            }
+        }
+        return [];
+    }
+
     let candidates = [];
     try {
         const ytId = extractYouTubeId(contextTrack.uri);
         if (ytId) {
             const mixUrl = `https://www.youtube.com/watch?v=${ytId}&list=RD${ytId}`;
             console.log(`   └─ Using YouTube Mix: ${mixUrl}`);
-            const result = await kazagumo.search(mixUrl, { requester: client.user });
-            if (result?.tracks?.length) candidates = result.tracks;
-            else console.warn(`   └─ Mix returned no tracks, falling back to artist search`);
+            // Mix is a YT URL — scsearch doesn't apply, only multi-node fallback.
+            candidates = await searchWithFallback(mixUrl, { allowScsearch: false });
+            if (!candidates.length) console.warn(`   └─ Mix returned no tracks, falling back to artist search`);
         }
 
         if (candidates.length === 0) {
-            // Fallback: artist-name search
+            // Fallback: artist-name search — multi-node + scsearch both apply.
             const artistMatch = contextTrack.title.match(/^([^-|]+)/);
             const searchQuery = artistMatch ? artistMatch[1].trim() : `radio ${contextTrack.title}`;
             console.log(`   └─ Fallback search: ${searchQuery}`);
-            const result = await kazagumo.search(searchQuery, { requester: client.user });
-            if (result?.tracks?.length) candidates = result.tracks;
+            candidates = await searchWithFallback(searchQuery, { allowScsearch: true });
         }
 
         if (candidates.length === 0) {
@@ -617,11 +700,16 @@ function scheduleDisconnect(player, kazagumo) {
     // If there's already an empty-channel timer running for this guild, skip — it will handle cleanup
     if (emptyChannelTimers.has(player.guildId)) return;
     setTimeout(async () => {
+        const p = kazagumo.players.get(player.guildId);
+        if (!p || p._twentyFourSeven || p.playing || p.queue.length !== 0) return;
         try {
-            const p = kazagumo.players.get(player.guildId);
-            if (p && !p._twentyFourSeven && !p.playing && p.queue.length === 0) await p.destroy();
+            await p.destroy();
         } catch (err) {
+            // destroy() can fail mid-flight (e.g. DNS EAI_AGAIN on the REST call);
+            // when that happens the player is stuck in DESTROYING state. Wipe it
+            // forcefully so the next /play doesn't trip on a zombie entry.
             console.error('Error destroying inactive player:', err);
+            await forceCleanupPlayer(player.guildId);
         }
     }, 3600000); // 1 hour of inactivity
 }
