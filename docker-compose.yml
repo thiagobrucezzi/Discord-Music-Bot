@@ -1,18 +1,18 @@
-# Stack completo del bot de música, pensado para la VM Oracle (E2.1.Micro, 1 GB).
+# Full music-bot stack, meant for the Oracle VM (E2.1.Micro, 1 GB).
 #
-#   lavalink      → nodo de audio propio (imagen oficial v4 + plugin youtube-source).
-#                   Solo accesible dentro de la red interna de Docker: NO expone el 2333.
-#   bot           → tu bot; conecta a lavalink:2333 como nodo PRIMARIO.
-#                   Los nodos Lavalink públicos quedan de fallback (lógica ya en index.js).
+#   lavalink      → your own audio node (official v4 image + youtube-source plugin).
+#                   Only reachable on the internal Docker network: does NOT expose 2333.
+#   bot           → your bot; connects to lavalink:2333 as the PRIMARY node.
+#                   Public Lavalink nodes stay as fallback (logic already in index.js).
 #
-# YouTube en IPs de datacenter (Oracle) exige sesión logueada ("This video requires
-# login"). Se resuelve con OAuth (cuenta DESCARTABLE) — ver el bloque oauth en
-# lavalink/application.yml y el PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN de abajo.
+# YouTube on datacenter IPs (Oracle) requires a logged-in session ("This video requires
+# login"). Solved with OAuth (a BURNER account) — see the oauth block in
+# lavalink/application.yml and PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN below.
 #
-# Variables (LAVALINK_PASSWORD, DISCORD_TOKEN, etc.) se leen del archivo .env
-# que vive SOLO en la VM (nunca se commitea — está en .gitignore).
+# Variables (LAVALINK_PASSWORD, DISCORD_TOKEN, etc.) are read from the .env file
+# that lives ONLY on the VM (never committed — it's in .gitignore).
 #
-# Uso en la VM:
+# Usage on the VM:
 #   docker compose pull && docker compose up -d
 
 services:
@@ -21,28 +21,28 @@ services:
     container_name: lavalink
     restart: unless-stopped
     environment:
-      # VM Micro = 1 OCPU / 1 GB. Heap acotado + SerialGC (menos overhead que G1
-      # en 1 core y heap chico) + metaspace y stack reducidos. Con esto Lavalink
-      # vive en ~450-550 MB de RSS, dejando aire para el SO, Docker y el bot.
-      # El swapfile de la VM (ver DEPLOY.md) cubre los picos.
+      # Micro VM = 1 OCPU / 1 GB. Capped heap + SerialGC (less overhead than G1 on a
+      # single core with a small heap) + reduced metaspace and stack. With this Lavalink
+      # sits around ~450-550 MB RSS, leaving room for the OS, Docker and the bot.
+      # The VM swapfile (see DEPLOY.md) covers the spikes.
       - _JAVA_OPTIONS=-Xmx384M -XX:+UseSerialGC -XX:MaxMetaspaceSize=128m -Xss512k
       - SERVER_PORT=2333
       - SERVER_ADDRESS=0.0.0.0
-      # Override del password definido en application.yml (Spring relaxed binding).
+      # Overrides the password defined in application.yml (Spring relaxed binding).
       - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD}
-      # OAuth de YouTube: refresh token de una cuenta DESCARTABLE, persistido en el .env
-      # de la VM (NUNCA en el repo). skipInitialization evita el device-flow en cada
-      # reinicio una vez que ya hay token. Necesario porque en IP de datacenter YouTube
-      # exige sesión logueada para reproducir.
+      # YouTube OAuth: refresh token from a BURNER account, persisted in the VM's .env
+      # (NEVER in the repo). skipInitialization avoids the device-flow on every restart
+      # once a token exists. Required because on a datacenter IP YouTube demands a
+      # logged-in session to play.
       - PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN=${YOUTUBE_OAUTH_REFRESH_TOKEN}
       - PLUGINS_YOUTUBE_OAUTH_SKIPINITIALIZATION=true
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
-    # Nota: NO montamos un volumen en /opt/Lavalink/plugins. La imagen corre como
-    # usuario no-root y un volumen Docker (root:root) le da "Permission denied" al
-    # bajar el .jar del plugin. Sin volumen, el plugin se descarga al boot dentro de
-    # la capa escribible del contenedor (segundos; solo se re-baja si cambia la
-    # imagen de Lavalink, que está pineada en :4-alpine).
+    # Note: we do NOT mount a volume on /opt/Lavalink/plugins. The image runs as a
+    # non-root user and a Docker volume (root:root) gives "Permission denied" when
+    # downloading the plugin .jar. Without a volume, the plugin downloads at boot into
+    # the container's writable layer (seconds; only re-downloaded if the Lavalink image
+    # changes, which is pinned to :4-alpine).
     networks:
       - botnet
     expose:
@@ -55,7 +55,7 @@ services:
       start_period: 60s
 
   bot:
-    # Imagen construida y pusheada por GitHub Actions (linux/amd64).
+    # Image built and pushed by GitHub Actions (linux/amd64).
     image: ${BOT_IMAGE:-ghcr.io/thiagobrucezzi/discord-music-bot:latest}
     container_name: discord-music-bot
     restart: unless-stopped

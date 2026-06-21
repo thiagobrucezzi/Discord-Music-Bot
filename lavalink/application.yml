@@ -1,11 +1,10 @@
-# Configuración de Lavalink v4 (nodo propio).
-# El password real se inyecta por la variable de entorno LAVALINK_SERVER_PASSWORD
-# (definida en docker-compose.yml desde el .env). El valor de abajo es solo placeholder.
+# Lavalink v4 configuration (your own node).
+# The real password is injected via the LAVALINK_SERVER_PASSWORD env var (set in
+# docker-compose.yml from the .env). The value below is just a placeholder.
 #
-# IMPORTANTE: el plugin youtube-source es la pieza que YouTube rompe seguido.
-# Cuando el bot deje de reproducir de YouTube, lo primero a revisar es subir
-# la versión del plugin acá (última en https://github.com/lavalink-devs/youtube-source/releases)
-# y redeployar.
+# IMPORTANT: the youtube-source plugin is the piece YouTube breaks often. When the bot
+# stops playing from YouTube, the first thing to check is bumping the plugin version here
+# (latest at https://github.com/lavalink-devs/youtube-source/releases) and redeploying.
 
 server:
   port: 2333
@@ -17,15 +16,15 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
-    # OAuth: en IPs de datacenter (Oracle) YouTube exige sesión logueada ("This video
-    # requires login"); el poToken solo no alcanza. Con oauth.enabled y SIN refreshToken,
-    # Lavalink imprime un código de device-flow al arrancar para autorizar una cuenta
-    # (usar una DESCARTABLE). Luego el refreshToken se inyecta por env y se persiste.
+    # OAuth: on datacenter IPs (Oracle) YouTube requires a logged-in session ("This video
+    # requires login"); a poToken alone is not enough. With oauth.enabled and NO refreshToken,
+    # Lavalink prints a device-flow code at startup to authorise an account (use a BURNER
+    # one). Then the refreshToken is injected via env and persisted.
     oauth:
       enabled: true
-    # Clientes: TV es el ÚNICO compatible con OAuth (hace el playback autenticado que
-    # esquiva el "requires login" en IPs de datacenter). MUSIC/WEB/ANDROID_VR aportan
-    # búsqueda, playlist y mix (metadata) que TV no tiene.
+    # Clients: TV is the ONLY OAuth-compatible one (it does the authenticated playback that
+    # bypasses "requires login" on datacenter IPs). MUSIC/WEB/ANDROID_VR provide search,
+    # playlist and mix (metadata) that TV lacks.
     clients:
       - MUSIC
       - WEB
@@ -37,9 +36,9 @@ lavalink:
     - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
       repository: "https://maven.lavalink.dev/releases"
   server:
-    password: "youshallnotpass" # sobrescrito por LAVALINK_SERVER_PASSWORD
+    password: "youshallnotpass" # overridden by LAVALINK_SERVER_PASSWORD
     sources:
-      # Se desactiva el source de YouTube nativo (deprecado) en favor del plugin.
+      # The built-in YouTube source (deprecated) is disabled in favor of the plugin.
       youtube: false
       bandcamp: true
       soundcloud: true
@@ -61,8 +60,8 @@ lavalink:
       lowPass: true
     bufferDurationMs: 400
     frameBufferDurationMs: 5000
-    # VM de 1 core: bajamos calidad de encoding/resampling para no saturar la CPU.
-    # La diferencia de audio es imperceptible en Discord; el ahorro de CPU sí importa.
+    # 1-core VM: we lower encoding/resampling quality so we don't saturate the CPU.
+    # The audio difference is imperceptible on Discord; the CPU savings do matter.
     opusEncodingQuality: 5
     resamplingQuality: LOW
     trackStuckThresholdMs: 10000
