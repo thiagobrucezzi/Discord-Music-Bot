@@ -28,7 +28,11 @@ services:
       - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD}
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
-      - lavalink-plugins:/opt/Lavalink/plugins
+    # Nota: NO montamos un volumen en /opt/Lavalink/plugins. La imagen corre como
+    # usuario no-root y un volumen Docker (root:root) le da "Permission denied" al
+    # bajar el .jar del plugin. Sin volumen, el plugin se descarga al boot dentro de
+    # la capa escribible del contenedor (segundos; solo se re-baja si cambia la
+    # imagen de Lavalink, que está pineada en :4-alpine).
     networks:
       - botnet
     expose:
@@ -55,6 +59,3 @@ services:
 networks:
   botnet:
     driver: bridge
-
-volumes:
-  lavalink-plugins:
