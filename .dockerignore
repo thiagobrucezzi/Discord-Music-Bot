@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log*
+.git
+.gitignore
+.github
+.env
+.env.*
+env
+*.log
+state/
+.vscode
+.idea
+.DS_Store
+README.md
+DEPLOY.md
+docker-compose.yml
+lavalink/plugins

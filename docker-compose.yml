@@ -1,0 +1,60 @@
+# Stack completo del bot de música, pensado para la VM Oracle (E2.1.Micro, 1 GB).
+#
+#   lavalink → nodo de audio propio (imagen oficial v4 + plugin youtube-source).
+#              Solo accesible dentro de la red interna de Docker: NO expone el 2333.
+#   bot      → tu bot; conecta a lavalink:2333 como nodo PRIMARIO.
+#              Los nodos Lavalink públicos quedan de fallback (lógica ya en index.js).
+#
+# Variables (LAVALINK_PASSWORD, DISCORD_TOKEN, etc.) se leen del archivo .env
+# que vive SOLO en la VM (nunca se commitea — está en .gitignore).
+#
+# Uso en la VM:
+#   docker compose pull && docker compose up -d
+
+services:
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4-alpine
+    container_name: lavalink
+    restart: unless-stopped
+    environment:
+      # VM Micro = 1 OCPU / 1 GB. Heap acotado + SerialGC (menos overhead que G1
+      # en 1 core y heap chico) + metaspace y stack reducidos. Con esto Lavalink
+      # vive en ~450-550 MB de RSS, dejando aire para el SO, Docker y el bot.
+      # El swapfile de la VM (ver DEPLOY.md) cubre los picos.
+      - _JAVA_OPTIONS=-Xmx384M -XX:+UseSerialGC -XX:MaxMetaspaceSize=128m -Xss512k
+      - SERVER_PORT=2333
+      - SERVER_ADDRESS=0.0.0.0
+      # Override del password definido en application.yml (Spring relaxed binding).
+      - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD}
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+      - lavalink-plugins:/opt/Lavalink/plugins
+    networks:
+      - botnet
+    expose:
+      - "2333"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --header=\"Authorization: ${LAVALINK_PASSWORD}\" -O /dev/null http://localhost:2333/version || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  bot:
+    # Imagen construida y pusheada por GitHub Actions (linux/amd64).
+    image: ${BOT_IMAGE:-ghcr.io/thiagobrucezzi/discord-music-bot:latest}
+    container_name: discord-music-bot
+    restart: unless-stopped
+    env_file: ./.env
+    depends_on:
+      lavalink:
+        condition: service_healthy
+    networks:
+      - botnet
+
+networks:
+  botnet:
+    driver: bridge
+
+volumes:
+  lavalink-plugins:
