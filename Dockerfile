@@ -1,18 +1,18 @@
-# Bot de música Discord — imagen liviana (Node 20 LTS)
-# Construida para linux/amd64 en CI (la VM Oracle Micro es AMD x86_64).
+# Discord music bot — lightweight image (Node 20 LTS)
+# Built for linux/amd64 in CI (the Oracle Micro VM is AMD x86_64).
 FROM node:20-slim
 
 WORKDIR /app
 
-# Instalar dependencias primero para aprovechar la cache de capas
+# Install dependencies first to take advantage of layer caching
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-# Código de la app
+# App code
 COPY . .
 
 ENV NODE_ENV=production
 
-# El bot solo hace conexiones salientes (gateway de Discord + Lavalink interno),
-# no expone ningún puerto.
+# The bot only makes outbound connections (Discord gateway + internal Lavalink),
+# it does not expose any port.
 CMD ["node", "index.js"]

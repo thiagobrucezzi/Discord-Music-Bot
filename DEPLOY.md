@@ -1,29 +1,29 @@
 # Deploy — Oracle Cloud (self-hosted Lavalink + CI/CD)
 
-Arquitectura: la VM corre **Lavalink propio + el bot** vía Docker Compose. GitHub
-Actions buildea la imagen del bot (`linux/amd64`), la pushea a GHCR y se conecta por
-SSH a la VM para actualizarla. Vos solo mergeás a `main` y se despliega solo.
+Architecture: the VM runs **your own Lavalink + the bot** via Docker Compose. GitHub
+Actions builds the bot image (`linux/amd64`), pushes it to GHCR, and connects over SSH to
+the VM to update it. You just merge to `main` and it deploys itself.
 
 ```
-push/merge a main ─► GitHub Actions ─► build imagen ─► GHCR
+push/merge to main ─► GitHub Actions ─► build image ─► GHCR
                                           │
-                                          └─ SSH a la VM ─► docker compose pull && up -d
-VM Oracle (E2.1.Micro, 1GB):
-  ┌─ lavalink  (nodo propio, red interna, NO expone 2333)  ◄── primario
-  └─ bot       (conecta a lavalink:2333; públicos = fallback)
+                                          └─ SSH to the VM ─► docker compose pull && up -d
+Oracle VM (E2.1.Micro, 1 GB):
+  ┌─ lavalink  (own node, internal network, does NOT expose 2333)  ◄── primary
+  └─ bot       (connects to lavalink:2333; public nodes = fallback)
 ```
 
 ---
 
-## 1. Bootstrap de la VM (una sola vez)
+## 1. VM bootstrap (one time)
 
-SSH a la VM:
+SSH into the VM:
 
 ```bash
 ssh -i ~/Downloads/ssh-key-2026-06-21-2.key ubuntu@<VM_PUBLIC_IP>
 ```
 
-Instalar Docker + plugin compose:
+Install Docker + the compose plugin:
 
 ```bash
 sudo apt-get update
@@ -34,10 +34,10 @@ sudo chmod a+r /etc/apt/keyrings/docker.asc
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-sudo usermod -aG docker ubuntu   # reconectar la sesión SSH después de esto
+sudo usermod -aG docker ubuntu   # reconnect the SSH session after this
 ```
 
-**Swapfile de 2 GB** (red de seguridad para 1 GB de RAM — clave para que Lavalink + bot no mueran por OOM):
+**2 GB swapfile** (safety net for 1 GB of RAM — key so Lavalink + bot don't get OOM-killed):
 
 ```bash
 sudo fallocate -l 2G /swapfile
@@ -49,7 +49,7 @@ sudo sysctl -w vm.swappiness=10
 echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.d/99-swappiness.conf
 ```
 
-Directorio de la app:
+App directory:
 
 ```bash
 mkdir -p ~/discord-music-bot/lavalink
@@ -57,98 +57,143 @@ mkdir -p ~/discord-music-bot/lavalink
 
 ---
 
-## 2. Archivos en la VM
+## 2. Files on the VM
 
-En `~/discord-music-bot/` van **solo** estos (el código del bot viaja como imagen, no se clona):
+Only these live in `~/discord-music-bot/` (the bot code travels as an image, it is not cloned):
 
 - `docker-compose.yml`
 - `lavalink/application.yml`
-- `.env`  ← **NO se commitea**, vive solo acá
+- `.env`  ← **never committed**, lives only here
 
-`.env` (tokens de Discord + nodo propio como primario):
+`.env` (Discord tokens + your own node as primary):
 
 ```dotenv
-DISCORD_TOKEN=<tu token de Discord>
-DISCORD_CLIENT_ID=<tu application id>
-# GUILD_ID=<opcional, para registrar slash commands al instante en un server>
+DISCORD_TOKEN=<your Discord token>
+DISCORD_CLIENT_ID=<your application id>
+# GUILD_ID=<optional, to register slash commands instantly on one server>
 
 LAVALINK_URL=lavalink:2333
-LAVALINK_PASSWORD=<password fuerte, el mismo que ve el contenedor lavalink>
+LAVALINK_PASSWORD=<strong password, the same one the lavalink container sees>
 LAVALINK_SECURE=false
+
+# YouTube OAuth (see next section). Filled in AFTER the first boot.
+YOUTUBE_OAUTH_REFRESH_TOKEN=<refresh token from the device-flow, BURNER account>
 ```
 
-> `LAVALINK_PASSWORD` se usa en dos lugares: el contenedor `lavalink` lo toma como
-> password del servidor, y el `bot` lo usa para autenticarse contra él. Tiene que ser
-> el mismo valor.
+> `LAVALINK_PASSWORD` is used in two places: the `lavalink` container takes it as the server
+> password, and the `bot` uses it to authenticate against it. It must be the same value.
 
 ---
 
-## 3. Llave de deploy para GitHub Actions
+## 2b. YouTube OAuth (REQUIRED for playback)
 
-Se generó un par **dedicado** (no es tu llave personal). La pública va a la VM:
+From a datacenter IP (any cloud VM) YouTube blocks the stream with *"This video requires
+login"*. A `poToken` alone is **not enough**; you must authenticate with **OAuth** using a
+**BURNER** Google account (⚠️ **never your main account** — it can get banned).
+
+The config is already in `lavalink/application.yml` (`plugins.youtube.oauth.enabled: true` +
+the `TV` client, the only OAuth-compatible one). Authorisation flow (one time):
+
+1. Start Lavalink **without** `YOUTUBE_OAUTH_REFRESH_TOKEN` in `.env`. The logs show:
+
+   ```
+   docker compose logs lavalink | grep -i "google.com/device"
+   # OAUTH INTEGRATION: ... go to https://www.google.com/device and enter code XXX-XXX-XXX
+   ```
+
+2. Go to **https://www.google.com/device**, enter the code and **authorise with the burner
+   account**.
+
+3. Lavalink prints the refresh token:
+
+   ```
+   docker compose logs lavalink | grep -i "refresh token"
+   # Token retrieved successfully. Store your refresh token ... (1//0e...)
+   ```
+
+4. Store it in `.env` as `YOUTUBE_OAUTH_REFRESH_TOKEN=1//0e...` and recreate Lavalink:
+
+   ```bash
+   docker compose up -d --force-recreate lavalink
+   docker compose logs lavalink | grep -i "access token refreshed"
+   # YouTube access token refreshed successfully   ← no longer asks for a code
+   ```
+
+`docker-compose.yml` passes that token as `PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN` with
+`PLUGINS_YOUTUBE_OAUTH_SKIPINITIALIZATION=true`, so it **survives restarts** without
+re-authorising.
+
+> If the burner account ever gets banned, repeat the flow with another account and update
+> `YOUTUBE_OAUTH_REFRESH_TOKEN`.
+
+---
+
+## 3. Deploy key for GitHub Actions
+
+A **dedicated** key pair was generated (not your personal key). The public part goes on the VM:
 
 ```bash
-# en la VM
+# on the VM
 echo "ssh-ed25519 AAAA... github-actions-deploy@discord-music-bot" >> ~/.ssh/authorized_keys
 ```
 
-La privada se carga como secret de GitHub (ver abajo).
+The private part is loaded as a GitHub secret (see below).
 
 ---
 
-## 4. Secrets en GitHub
+## 4. GitHub secrets
 
 Repo → Settings → Secrets and variables → Actions:
 
-| Secret | Valor |
+| Secret | Value |
 |---|---|
-| `VM_HOST` | la IP pública de tu VM |
+| `VM_HOST` | your VM's public IP |
 | `VM_USER` | `ubuntu` |
-| `VM_SSH_KEY` | contenido completo de la llave privada **dedicada** de deploy |
+| `VM_SSH_KEY` | full contents of the **dedicated** deploy private key |
 
-`GITHUB_TOKEN` ya existe (lo usa el workflow para pushear a GHCR, no hay que crearlo).
+`GITHUB_TOKEN` already exists (the workflow uses it to push to GHCR, no need to create it).
 
 ---
 
-## 5. Visibilidad de la imagen GHCR
+## 5. GHCR image visibility
 
-**Default (recomendado): pública.** La imagen NO contiene secretos —el `.dockerignore`
-excluye el `env`, así que el token de Discord nunca viaja dentro—. Dejarla pública es
-seguro y es lo más simple: la VM la baja **sin login** y el deploy funciona tal cual.
-Cualquiera puede bajarla, pero sin tu token de Discord es código sin uso.
+**Default (recommended): public.** The image contains NO secrets — `.dockerignore` excludes
+the `env`, so the Discord token never travels inside. Keeping it public is safe and simplest:
+the VM pulls it **without login** and the deploy works as-is. Anyone can pull it, but without
+your Discord token it's unusable code.
 
-**Opcional: privada.** Si querés ocultar el código/imagen por preferencia (no aporta
-seguridad sobre los secretos), hay que loguear la VM a GHCR una sola vez:
+**Optional: private.** If you want to hide the code/image as a preference (it adds no security
+over the secrets), you must log the VM into GHCR once:
 
-1. PAT (classic) en GitHub → Settings → Developer settings → Personal access tokens →
-   **Tokens (classic)**, con **solo** el scope `read:packages`.
-2. Loguear la VM (en TU terminal, para que el token no quede en logs ajenos):
+1. PAT (classic) in GitHub → Settings → Developer settings → Personal access tokens →
+   **Tokens (classic)**, with **only** the `read:packages` scope.
+2. Log the VM in (run it in YOUR terminal so the token doesn't leak into shared logs):
 
    ```bash
    ssh -i ~/Downloads/ssh-key-...key ubuntu@<VM_PUBLIC_IP> \
-     'echo <PAT> | docker login ghcr.io -u <tu-usuario-github> --password-stdin'
+     'echo <PAT> | docker login ghcr.io -u <your-github-user> --password-stdin'
    ```
 
-3. **Recién después** poné el package en privado: GitHub → perfil → *Packages* →
+3. **Only then** set the package to private: GitHub → profile → *Packages* →
    `discord-music-bot` → *Package settings* → *Change visibility* → **Private**.
 
-> Orden importante: primero el login en la VM, después privar el package. Al revés,
-> el siguiente deploy falla en el `pull`.
+> Order matters: log the VM in first, then make the package private. The other way around,
+> the next deploy fails at `pull`.
 
 ---
 
-## 6. Primer deploy
+## 6. First deploy
 
-La primera vez se hace a mano (después es automático):
+The first time is done by hand (afterwards it's automatic):
 
 ```bash
 cd ~/discord-music-bot
-docker compose pull        # baja lavalink + la imagen del bot
+docker compose pull        # pulls lavalink + the bot image
 docker compose up -d
-docker compose logs -f      # verificar que el bot conecta a lavalink:2333
+docker compose logs -f      # verify the bot connects to lavalink:2333
 ```
 
-Registrar los slash commands (una vez, o cuando cambien):
+Register the slash commands (once, or whenever they change):
 
 ```bash
 docker compose run --rm bot node deploy-commands.js
@@ -156,20 +201,25 @@ docker compose run --rm bot node deploy-commands.js
 
 ---
 
-## 7. Día a día (CI/CD)
+## 7. Day to day (CI/CD)
 
-1. Trabajás en una rama, abrís PR contra `main`.
-2. Mergeás el PR → el workflow buildea, pushea a GHCR y actualiza la VM solo.
-3. No hace falta volver a entrar por SSH.
+1. Work on a branch, open a PR against `main`.
+2. Merge the PR → the workflow builds, pushes to GHCR and updates the VM by itself.
+3. No need to SSH in again.
 
-Forzar un deploy manual: Actions → **Build & Deploy** → Run workflow.
+Force a manual deploy: Actions → **Build & Deploy** → Run workflow.
+
+> ⚠️ CI only redeploys the **bot image**. Changes to `docker-compose.yml` or
+> `lavalink/application.yml` are NOT auto-copied to the VM — `scp` them (or edit them
+> directly there) and run `docker compose up -d` manually.
 
 ---
 
-## 8. Mantenimiento
+## 8. Maintenance
 
-- **YouTube deja de andar** → casi siempre es el plugin. Subí la versión en
-  `lavalink/application.yml` (`dev.lavalink.youtube:youtube-plugin:<última>` de
-  https://github.com/lavalink-devs/youtube-source/releases), commit, merge → redeploy.
-- **Ver uso de RAM/swap**: `free -h` y `docker stats` en la VM.
+- **YouTube stops working** → it's almost always the plugin. Bump the version in
+  `lavalink/application.yml` (`dev.lavalink.youtube:youtube-plugin:<latest>` from
+  https://github.com/lavalink-devs/youtube-source/releases), commit, then update the VM and
+  recreate Lavalink. If it asks for login again, redo the OAuth flow (section 2b).
+- **Check RAM/swap usage**: `free -h` and `docker stats` on the VM.
 - **Logs**: `docker compose logs -f lavalink` / `docker compose logs -f bot`.

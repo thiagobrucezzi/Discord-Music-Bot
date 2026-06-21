@@ -22,12 +22,44 @@ Complete music bot for Discord using **Kazagumo**, **Shoukaku** and **Lavalink**
 - ✅ **Manual-disconnect cleanup** — if someone kicks the bot from the voice channel, the player is destroyed cleanly
 - ✅ Modern slash commands
 
+---
+
+## 🚀 Deployment Options
+
+The bot runs the **same code** everywhere — pick the hosting that fits you. The real
+difference is **where Lavalink (the audio engine) lives** and how reliable YouTube
+playback is:
+
+| Option | Best for | Lavalink (audio) | YouTube reliability | Updates |
+|---|---|---|---|---|
+| **Local** (Step 7) | development & testing | public nodes (or your own jar) | depends on the node | manual `npm start` |
+| **Wispbyte** (Step 8) | free, zero-DevOps hosting | public nodes | flaky (shared public nodes) | `git push` auto-deploy |
+| **Oracle Cloud — full self-host** (Step 9) | reliability & control, still **$0** | **your own node** + public fallback | **high** (own node + OAuth) | `push` → image → auto-deploy |
+
+### Why this matters
+
+- **Lavalink** is the engine that actually fetches and streams the audio. The bot is just
+  the Discord "brain" that talks to it over the network.
+- **Public Lavalink nodes** are free and need zero setup, but they're shared and get
+  blocked/rate-limited by YouTube constantly — the #1 cause of *"the bot joins but there's
+  no sound"* and random outages.
+- **Running your own Lavalink** (Step 9) removes that dependency. The catch: from a
+  **datacenter IP** (any cloud VM), YouTube demands a logged-in session, so you do a
+  one-time **OAuth** login with a **throwaway Google account**. The payoff is a bot that's
+  reliable, fully yours, and **free** on Oracle Cloud's Always Free tier.
+
+> 🧭 **New here?** Start with **Local** (Step 7) to confirm your bot token works, then
+> deploy to **Wispbyte** (easiest) or **Oracle** (most reliable, recommended).
+
+---
+
 ## 📋 Requirements
 
 - **Node.js** 18.0.0 or higher
 - **npm** 7.0.0 or higher
 - A **Discord bot** created
-- A **Lavalink v4** server — the bot auto-discovers free public nodes, so no manual setup is needed
+- A **Lavalink v4** server — the bot auto-discovers free public nodes, so no manual setup is needed (or run **your own** for reliability — see Step 9)
+- **(Optional, for Step 9)** A host with **Docker** + Docker Compose. Oracle Cloud's **Always Free** tier is a great free home for it.
 
 ---
 
@@ -166,6 +198,12 @@ LAVALINK_SECURE=true
 - **`GUILD_ID`:** Your server ID (Step 3.3). **Optional** — if set, slash commands appear on that server within 1-2 minutes. If omitted, they register globally and may take up to 1 hour.
 - **`LAVALINK_URL` / `LAVALINK_PASSWORD` / `LAVALINK_SECURE`:** Your primary Lavalink node. The bot will automatically connect to additional public nodes for redundancy — so even if the primary is down, music keeps playing.
 
+> **Which Lavalink values to use, per deployment:**
+> - **Local / Wispbyte:** point to a public v4 SSL node, e.g. `LAVALINK_URL=lavalink-v4.triniumhost.com:443`, `LAVALINK_PASSWORD=free`, `LAVALINK_SECURE=true`.
+> - **Oracle / Docker (Step 9):** point to your own node on the internal Docker network — `LAVALINK_URL=lavalink:2333`, `LAVALINK_PASSWORD=<your strong password>`, `LAVALINK_SECURE=false`.
+>
+> Either way the bot still auto-discovers public nodes as fallback.
+
 ---
 
 ## 🎵 Step 6: Configure Lavalink
@@ -211,11 +249,19 @@ If you want to run your own Lavalink server:
      port: 2333
      address: 0.0.0.0
 
+   # Use the youtube-source plugin — the built-in YouTube source is deprecated.
+   plugins:
+     youtube:
+       enabled: true
+
    lavalink:
+     plugins:
+       - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
+         repository: "https://maven.lavalink.dev/releases"
      server:
        password: "youshallnotpass"
        sources:
-         youtube: true
+         youtube: false   # disabled built-in; the plugin handles YouTube
          soundcloud: true
    ```
 
@@ -230,6 +276,12 @@ If you want to run your own Lavalink server:
    LAVALINK_PASSWORD=youshallnotpass
    LAVALINK_SECURE=false
    ```
+
+> ⚠️ **Running on a cloud VM / VPS?** YouTube blocks audio streaming from datacenter IPs
+> (*"This video requires login"*) — a `poToken` alone is **not** enough. You'll need the
+> `youtube-source` **OAuth** setup with a throwaway Google account. See **Step 9** for the
+> complete, production-ready version (Docker + your own Lavalink + OAuth + CI/CD). On a
+> home/residential connection, the config above usually works without OAuth.
 
 ---
 
@@ -651,6 +703,115 @@ If everything is okay, you should see in the logs:
 
 ---
 
+## ☁️ Step 9: Deploy on Oracle Cloud (Free, Full Self-Hosted)
+
+The **most reliable, fully free** way to run the bot: your **own Lavalink node** + the bot,
+both in Docker on an Oracle Cloud **Always Free** VM, with a **CI/CD pipeline** that
+auto-deploys on every push. No more depending on flaky public nodes.
+
+> 📖 The exhaustive server runbook (VM creation, Docker install, swap, secrets, OAuth,
+> first deploy, maintenance) lives in **[DEPLOY.md](DEPLOY.md)**. This section explains the
+> architecture and the essentials.
+
+### Why self-host? (the architecture)
+
+Public Lavalink nodes are shared and constantly blocked/rate-limited by YouTube — the
+usual cause of *"the bot joins but there's no audio"*. Running your own node removes that
+dependency. The whole stack is one `docker compose`:
+
+```
+   push/merge to main ─► GitHub Actions ─► build bot image ─► GHCR (image registry)
+                                              │
+                                              └─ SSH to the VM ─► docker compose pull && up -d
+   VM (Oracle Always Free, Docker only):
+     ┌─ lavalink container  (own node: Lavalink v4 + youtube-source + OAuth)  ◄── primary
+     │      ▲  internal docker network (lavalink:2333, NOT exposed publicly)
+     └─ bot container  ──────────────────────────────────────────────► Discord
+            └─► public Lavalink nodes  ◄── automatic fallback if your node is down
+```
+
+- **`lavalink`** — official `lavalink:4-alpine` image + `youtube-source` plugin. Reachable
+  only on the internal Docker network; **port 2333 is never exposed**.
+- **`bot`** — your image (built by CI), connects to `lavalink:2333` as the **primary** node;
+  public nodes stay configured as **fallback** (logic already in `index.js`).
+
+### ⚠️ Why YouTube needs OAuth on a cloud VM
+
+From a **datacenter IP** (any cloud VM), YouTube flags requests with **"This video requires
+login"** — and a `poToken` alone is **not enough**. The fix is a one-time **OAuth** login
+using a **throwaway Google account** (⚠️ **never your main account** — it can get banned).
+The `TV` client then streams as a logged-in user.
+
+1. `lavalink/application.yml` sets `plugins.youtube.oauth.enabled: true` and includes the
+   `TV` client (the only OAuth-compatible one).
+2. On first start, Lavalink logs a code → go to **https://www.google.com/device**, enter it,
+   and authorise with the **burner** account.
+3. Lavalink prints a **refresh token**. Store it as `YOUTUBE_OAUTH_REFRESH_TOKEN` in the
+   VM's `.env`; `docker-compose.yml` passes it as `PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN` with
+   `PLUGINS_YOUTUBE_OAUTH_SKIPINITIALIZATION=true`, so it **survives restarts** without
+   re-authorising.
+
+### `.env` (lives only on the VM — never committed)
+
+```dotenv
+DISCORD_TOKEN=your_token_here
+DISCORD_CLIENT_ID=your_application_id     # optional
+# GUILD_ID=your_server_id                 # optional
+
+LAVALINK_URL=lavalink:2333
+LAVALINK_PASSWORD=use_a_strong_password   # same value the lavalink container uses
+LAVALINK_SECURE=false
+
+# From the OAuth device-flow above (burner Google account):
+YOUTUBE_OAUTH_REFRESH_TOKEN=1//0e...
+```
+
+### Run it
+
+```bash
+docker compose up -d                              # starts lavalink + bot
+docker compose logs -f                            # watch: "✅ Lavalink primary: Connected!"
+docker compose run --rm bot node deploy-commands.js   # register slash commands once
+```
+
+### CI/CD — `push` → live (GitHub Actions → GHCR → VM)
+
+On every push to `main`, [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml):
+
+1. **Builds** the bot image (`linux/amd64`) and **pushes** it to **GHCR**
+   (`ghcr.io/<your-username>/discord-music-bot`).
+2. **SSHes** into the VM and runs `docker compose pull && docker compose up -d`.
+
+Add these **repository secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `VM_HOST` | your VM's public IP |
+| `VM_USER` | SSH user (e.g. `ubuntu`) |
+| `VM_SSH_KEY` | a **dedicated** SSH private key (its public key goes in the VM's `~/.ssh/authorized_keys`) |
+
+Pushing the image uses the built-in `GITHUB_TOKEN`. If you keep the GHCR package **public**
+the VM pulls anonymously (no secrets in the image — the `.env` is injected at runtime). For
+a **private** image, `docker login ghcr.io` once on the VM with a `read:packages` PAT.
+
+### Resource footprint
+
+On the **smallest** Always Free VM (1 OCPU / 1 GB RAM), with a song playing:
+
+| Service | RAM | CPU |
+|---|---|---|
+| lavalink | ~200 MB | ~0% |
+| bot | ~50 MB | ~0% |
+| **Total VM** | **~600 MB / 954** | load ~0.1 (1 core) |
+
+A 2 GB swapfile (see DEPLOY.md) is added as a safety net. Streaming barely registers.
+
+> 📖 Full step-by-step — instance creation, swap, Docker install, secrets, OAuth, first
+> deploy, and maintenance (e.g. bumping the `youtube-source` plugin when YouTube changes):
+> **[DEPLOY.md](DEPLOY.md)**.
+
+---
+
 ## 🎮 Available Commands
 
 | Command | Description |
@@ -809,12 +970,32 @@ When inviting the bot, make sure to give it these permissions:
 
 ---
 
-## 🙏 Credits
+## 🙏 Credits & References
 
-- [Kazagumo](https://github.com/Takiyo0/Kazagumo) - Wrapper for Shoukaku
-- [Shoukaku](https://github.com/shipgirlproject/Shoukaku) - Lavalink client
-- [Lavalink](https://github.com/lavalink-devs/Lavalink) - Audio server
-- [Discord.js](https://discord.js.org/) - Discord library
+### Built with
+
+- [Discord.js](https://discord.js.org/) — Discord library
+- [Kazagumo](https://github.com/Takiyo0/Kazagumo) — Wrapper for Shoukaku
+- [Shoukaku](https://github.com/shipgirlproject/Shoukaku) — Lavalink client
+- [Lavalink](https://github.com/lavalink-devs/Lavalink) — Audio server
+- [youtube-source](https://github.com/lavalink-devs/youtube-source) — YouTube source manager + OAuth/poToken for Lavalink
+
+### Infrastructure & deployment (Step 9)
+
+- [Oracle Cloud — Always Free](https://www.oracle.com/cloud/free/) — the free VM
+- [Lavalink Docker docs](https://lavalink.dev/getting-started/docker) — official compose/image reference
+- [GitHub Container Registry (GHCR)](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) — bot image registry
+- [GitHub Actions](https://docs.github.com/en/actions) — CI/CD
+- [docker/build-push-action](https://github.com/docker/build-push-action) — builds & pushes the image
+- [appleboy/ssh-action](https://github.com/appleboy/ssh-action) — SSH deploy step
+
+### YouTube anti-bot — further reading
+
+- [youtube-source: OAuth & poToken](https://github.com/lavalink-devs/youtube-source#using-a-potoken) — why a cloud VM needs OAuth
+- ["Video requires login on dedicated server" (issue #107)](https://github.com/lavalink-devs/youtube-source/issues/107) — the exact datacenter-IP problem
+- [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) — browserless poToken generator (an alternative to OAuth)
+- [youtube-trusted-session-generator](https://github.com/iv-org/youtube-trusted-session-generator) — Chromium-based poToken/visitorData generator
+- [yt-dlp PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide) — background on Proof-of-Origin tokens
 
 ---
 
