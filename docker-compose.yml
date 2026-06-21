@@ -1,9 +1,13 @@
 # Stack completo del bot de música, pensado para la VM Oracle (E2.1.Micro, 1 GB).
 #
-#   lavalink → nodo de audio propio (imagen oficial v4 + plugin youtube-source).
-#              Solo accesible dentro de la red interna de Docker: NO expone el 2333.
-#   bot      → tu bot; conecta a lavalink:2333 como nodo PRIMARIO.
-#              Los nodos Lavalink públicos quedan de fallback (lógica ya en index.js).
+#   lavalink      → nodo de audio propio (imagen oficial v4 + plugin youtube-source).
+#                   Solo accesible dentro de la red interna de Docker: NO expone el 2333.
+#   bot           → tu bot; conecta a lavalink:2333 como nodo PRIMARIO.
+#                   Los nodos Lavalink públicos quedan de fallback (lógica ya en index.js).
+#
+# YouTube en IPs de datacenter (Oracle) exige sesión logueada ("This video requires
+# login"). Se resuelve con OAuth (cuenta DESCARTABLE) — ver el bloque oauth en
+# lavalink/application.yml y el PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN de abajo.
 #
 # Variables (LAVALINK_PASSWORD, DISCORD_TOKEN, etc.) se leen del archivo .env
 # que vive SOLO en la VM (nunca se commitea — está en .gitignore).
@@ -26,6 +30,12 @@ services:
       - SERVER_ADDRESS=0.0.0.0
       # Override del password definido en application.yml (Spring relaxed binding).
       - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD}
+      # OAuth de YouTube: refresh token de una cuenta DESCARTABLE, persistido en el .env
+      # de la VM (NUNCA en el repo). skipInitialization evita el device-flow en cada
+      # reinicio una vez que ya hay token. Necesario porque en IP de datacenter YouTube
+      # exige sesión logueada para reproducir.
+      - PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN=${YOUTUBE_OAUTH_REFRESH_TOKEN}
+      - PLUGINS_YOUTUBE_OAUTH_SKIPINITIALIZATION=true
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
     # Nota: NO montamos un volumen en /opt/Lavalink/plugins. La imagen corre como

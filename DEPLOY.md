@@ -75,11 +75,57 @@ DISCORD_CLIENT_ID=<tu application id>
 LAVALINK_URL=lavalink:2333
 LAVALINK_PASSWORD=<password fuerte, el mismo que ve el contenedor lavalink>
 LAVALINK_SECURE=false
+
+# OAuth de YouTube (ver sección siguiente). Se completa DESPUÉS del primer arranque.
+YOUTUBE_OAUTH_REFRESH_TOKEN=<refresh token del device-flow, cuenta DESCARTABLE>
 ```
 
 > `LAVALINK_PASSWORD` se usa en dos lugares: el contenedor `lavalink` lo toma como
 > password del servidor, y el `bot` lo usa para autenticarse contra él. Tiene que ser
 > el mismo valor.
+
+---
+
+## 2b. OAuth de YouTube (OBLIGATORIO para reproducir)
+
+Desde una IP de datacenter (cualquier VM cloud) YouTube bloquea el stream con *"This video
+requires login"*. Un `poToken` solo **no alcanza**; hay que autenticar con **OAuth** usando
+una cuenta de Google **DESCARTABLE** (⚠️ **nunca tu cuenta principal** — puede ser baneada).
+
+La config ya está en `lavalink/application.yml` (`plugins.youtube.oauth.enabled: true` + el
+cliente `TV`, el único compatible con OAuth). Flujo de autorización (una sola vez):
+
+1. Arrancá Lavalink **sin** `YOUTUBE_OAUTH_REFRESH_TOKEN` en el `.env`. En los logs aparece:
+
+   ```
+   docker compose logs lavalink | grep -i "google.com/device"
+   # OAUTH INTEGRATION: ... go to https://www.google.com/device and enter code XXX-XXX-XXX
+   ```
+
+2. Andá a **https://www.google.com/device**, ingresá el código y **autorizá con la cuenta
+   descartable**.
+
+3. Lavalink imprime el refresh token:
+
+   ```
+   docker compose logs lavalink | grep -i "refresh token"
+   # Token retrieved successfully. Store your refresh token ... (1//0e...)
+   ```
+
+4. Guardalo en el `.env` como `YOUTUBE_OAUTH_REFRESH_TOKEN=1//0e...` y recreá Lavalink:
+
+   ```bash
+   docker compose up -d --force-recreate lavalink
+   docker compose logs lavalink | grep -i "access token refreshed"
+   # YouTube access token refreshed successfully   ← ya no pide código
+   ```
+
+`docker-compose.yml` pasa ese token como `PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN` con
+`PLUGINS_YOUTUBE_OAUTH_SKIPINITIALIZATION=true`, así que **sobrevive reinicios** sin volver
+a autorizar.
+
+> Si la cuenta descartable es baneada algún día, repetí el flujo con otra cuenta y
+> actualizá `YOUTUBE_OAUTH_REFRESH_TOKEN`.
 
 ---
 
