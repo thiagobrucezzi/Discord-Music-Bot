@@ -20,7 +20,7 @@ VM Oracle (E2.1.Micro, 1GB):
 SSH a la VM:
 
 ```bash
-ssh -i ~/Downloads/ssh-key-2026-06-21-2.key ubuntu@150.230.219.8
+ssh -i ~/Downloads/ssh-key-2026-06-21-2.key ubuntu@<VM_PUBLIC_IP>
 ```
 
 Instalar Docker + plugin compose:
@@ -102,7 +102,7 @@ Repo → Settings → Secrets and variables → Actions:
 
 | Secret | Valor |
 |---|---|
-| `VM_HOST` | `150.230.219.8` |
+| `VM_HOST` | la IP pública de tu VM |
 | `VM_USER` | `ubuntu` |
 | `VM_SSH_KEY` | contenido completo de la llave privada **dedicada** de deploy |
 
@@ -110,14 +110,29 @@ Repo → Settings → Secrets and variables → Actions:
 
 ---
 
-## 5. Imagen en GHCR pública
+## 5. Imagen en GHCR privada (con login en la VM)
 
-Tras el primer build, la imagen `ghcr.io/<owner>/discord-music-bot` se crea **privada**.
-Para que la VM la pueda bajar sin login, hacela pública:
+Mantenemos la imagen **privada**. Para que la VM la pueda bajar, hay que loguearla
+a GHCR **una sola vez** con un Personal Access Token de solo lectura de packages.
 
-GitHub → tu perfil → Packages → `discord-music-bot` → Package settings → Change visibility → Public.
+1. Crear un PAT (classic) en GitHub → Settings → Developer settings → Personal access
+   tokens → **Tokens (classic)** → Generate, con **solo** el scope `read:packages`.
+2. Loguear la VM (correr en TU terminal, así el token no queda en logs ajenos):
 
-(Alternativa privada: `docker login ghcr.io` en la VM con un PAT de read:packages.)
+   ```bash
+   ssh -i ~/Downloads/ssh-key-...key ubuntu@<VM_PUBLIC_IP> \
+     'echo <PAT> | docker login ghcr.io -u <tu-usuario-github> --password-stdin'
+   ```
+
+   El login queda guardado en `~/.docker/config.json` de la VM, que es el mismo
+   usuario (`ubuntu`) con el que entra el deploy de GitHub Actions → los `docker
+   compose pull` siguientes autentican solos.
+
+3. **Recién después** poné el package en privado: GitHub → perfil → *Packages* →
+   `discord-music-bot` → *Package settings* → *Change visibility* → **Private**.
+
+> Orden importante: primero el login en la VM, después privar el package. Al revés,
+> el siguiente deploy falla en el `pull`.
 
 ---
 

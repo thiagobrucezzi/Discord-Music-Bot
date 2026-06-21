@@ -66,8 +66,8 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
-          script_stop: true
           script: |
+            set -e
             cd ~/discord-music-bot
             docker compose pull
             docker compose up -d
