@@ -110,23 +110,24 @@ Repo → Settings → Secrets and variables → Actions:
 
 ---
 
-## 5. Imagen en GHCR privada (con login en la VM)
+## 5. Visibilidad de la imagen GHCR
 
-Mantenemos la imagen **privada**. Para que la VM la pueda bajar, hay que loguearla
-a GHCR **una sola vez** con un Personal Access Token de solo lectura de packages.
+**Default (recomendado): pública.** La imagen NO contiene secretos —el `.dockerignore`
+excluye el `env`, así que el token de Discord nunca viaja dentro—. Dejarla pública es
+seguro y es lo más simple: la VM la baja **sin login** y el deploy funciona tal cual.
+Cualquiera puede bajarla, pero sin tu token de Discord es código sin uso.
 
-1. Crear un PAT (classic) en GitHub → Settings → Developer settings → Personal access
-   tokens → **Tokens (classic)** → Generate, con **solo** el scope `read:packages`.
-2. Loguear la VM (correr en TU terminal, así el token no queda en logs ajenos):
+**Opcional: privada.** Si querés ocultar el código/imagen por preferencia (no aporta
+seguridad sobre los secretos), hay que loguear la VM a GHCR una sola vez:
+
+1. PAT (classic) en GitHub → Settings → Developer settings → Personal access tokens →
+   **Tokens (classic)**, con **solo** el scope `read:packages`.
+2. Loguear la VM (en TU terminal, para que el token no quede en logs ajenos):
 
    ```bash
    ssh -i ~/Downloads/ssh-key-...key ubuntu@<VM_PUBLIC_IP> \
      'echo <PAT> | docker login ghcr.io -u <tu-usuario-github> --password-stdin'
    ```
-
-   El login queda guardado en `~/.docker/config.json` de la VM, que es el mismo
-   usuario (`ubuntu`) con el que entra el deploy de GitHub Actions → los `docker
-   compose pull` siguientes autentican solos.
 
 3. **Recién después** poné el package en privado: GitHub → perfil → *Packages* →
    `discord-music-bot` → *Package settings* → *Change visibility* → **Private**.
