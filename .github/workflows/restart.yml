@@ -1,0 +1,41 @@
+name: Restart Bot
+
+# Manual one-click restart of the stack on the VM.
+# Run it from the Actions tab → "Restart Bot" → Run workflow.
+# Useful when the bot misbehaves or a container hangs while the VM is still reachable
+# over SSH. (For automatic recovery of a hung/unhealthy container, see the optional
+# autoheal note in DEPLOY.md.)
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "restart = quick (docker compose restart); recreate = full down + up -d"
+        type: choice
+        default: restart
+        options:
+          - restart
+          - recreate
+
+jobs:
+  restart:
+    name: Restart on the Oracle VM
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH → restart the stack
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/discord-music-bot
+            if [ "${{ inputs.mode }}" = "recreate" ]; then
+              echo "Recreating the stack (down + up -d)..."
+              docker compose down
+              docker compose up -d
+            else
+              echo "Restarting the stack..."
+              docker compose restart
+            fi
+            docker compose ps
