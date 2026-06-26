@@ -217,9 +217,19 @@ Force a manual deploy: Actions → **Build & Deploy** → Run workflow.
 
 ## 8. Maintenance
 
-- **YouTube stops working** → it's almost always the plugin. Bump the version in
-  `lavalink/application.yml` (`dev.lavalink.youtube:youtube-plugin:<latest>` from
-  https://github.com/lavalink-devs/youtube-source/releases), commit, then update the VM and
-  recreate Lavalink. If it asks for login again, redo the OAuth flow (section 2b).
+- **YouTube stops working** → two possible causes, two different fixes:
+  - **"Must find sig function from script"** — YouTube rotated its player script; the remote
+    cipher server (`cipher.kikkia.dev`) in `lavalink/application.yml` handles this
+    automatically. Verify the boot log shows
+    `Using remote cipher server with URL "https://cipher.kikkia.dev/"`. If the URL is
+    missing, copy the latest `lavalink/application.yml` from the repo to the VM and recreate
+    Lavalink. If the public instance is unreachable, self-host
+    [`yt-cipher`](https://github.com/kikkia/yt-cipher) as a sidecar.
+  - **"This video requires login"** — OAuth token expired or revoked. Redo section 2b with
+    the same (or a new) burner account and update `YOUTUBE_OAUTH_REFRESH_TOKEN` in `.env`.
+  - **Both fine but still no audio** → bump the plugin version in `lavalink/application.yml`
+    (`dev.lavalink.youtube:youtube-plugin:<latest>` from
+    https://github.com/lavalink-devs/youtube-source/releases), commit, update the VM and
+    recreate Lavalink.
 - **Check RAM/swap usage**: `free -h` and `docker stats` on the VM.
 - **Logs**: `docker compose logs -f lavalink` / `docker compose logs -f bot`.

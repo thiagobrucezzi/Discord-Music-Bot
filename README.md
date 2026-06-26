@@ -735,7 +735,11 @@ dependency. The whole stack is one `docker compose`:
 - **`bot`** — your image (built by CI), connects to `lavalink:2333` as the **primary** node;
   public nodes stay configured as **fallback** (logic already in `index.js`).
 
-### ⚠️ Why YouTube needs OAuth on a cloud VM
+### ⚠️ Why YouTube needs OAuth + a remote cipher on a cloud VM
+
+Two separate problems, two separate fixes — both are already configured in `lavalink/application.yml`.
+
+#### 1 — OAuth: bypasses the datacenter IP block
 
 From a **datacenter IP** (any cloud VM), YouTube flags requests with **"This video requires
 login"** — and a `poToken` alone is **not enough**. The fix is a one-time **OAuth** login
@@ -750,6 +754,25 @@ The `TV` client then streams as a logged-in user.
    VM's `.env`; `docker-compose.yml` passes it as `PLUGINS_YOUTUBE_OAUTH_REFRESHTOKEN` with
    `PLUGINS_YOUTUBE_OAUTH_SKIPINITIALIZATION=true`, so it **survives restarts** without
    re-authorising.
+
+#### 2 — Remote cipher server: fixes player script parsing
+
+YouTube periodically rotates its JavaScript player. When it does, `youtube-source`'s local
+parser breaks with `Must find sig function from script: /s/player/XXXXXXXX/...`.  
+The fix (introduced in `youtube-source` v1.14.0, now the official recommendation) is to
+delegate parsing to a remote service. `lavalink/application.yml` already has:
+
+```yaml
+plugins:
+  youtube:
+    remoteCipher:
+      url: "https://cipher.kikkia.dev/"
+```
+
+`cipher.kikkia.dev` is the maintainer-run public instance (rate limit: 10 req/s — more than
+enough for a personal bot). No extra setup needed; it's already wired in.  
+If you ever need more capacity, self-host [`yt-cipher`](https://github.com/kikkia/yt-cipher)
+as a Docker sidecar and point the URL to `http://yt-cipher:8001`.
 
 ### `.env` (lives only on the VM — never committed)
 
@@ -929,6 +952,28 @@ Discord-Music-Bot/
 - ✅ Make sure you're in a voice channel before using `/play`
 - ✅ Verify that the bot has permissions to connect to the channel
 
+### YouTube stops playing — "Must find sig function" in Lavalink logs
+
+YouTube rotates its player scripts periodically. When `youtube-source`'s local parser can't
+handle the new script, Lavalink logs:
+
+```
+Client [TVHTML5] failed: Must find sig function from script: /s/player/XXXXXXXX/...
+```
+
+**This is already handled** — `lavalink/application.yml` configures a remote cipher server
+(`cipher.kikkia.dev`) that does the parsing externally. Verify it's active by checking the
+boot log:
+
+```
+Using remote cipher server with URL "https://cipher.kikkia.dev/"
+```
+
+If the line is missing, copy the latest `lavalink/application.yml` from the repo to the VM
+and restart Lavalink. If the instance is unreachable, check connectivity from the VM:
+`curl -s https://cipher.kikkia.dev/` — or self-host
+[`yt-cipher`](https://github.com/kikkia/yt-cipher) as a sidecar.
+
 ### `/play` says "No results found" for a well-known artist
 
 The Lavalink YouTube plugin gets rate-limited or blocked by YouTube's anti-bot from time to time — when it happens, search returns 0 tracks instead of an error. The bot already mitigates this by racing the search across every connected node in parallel and falling back to SoundCloud (`scsearch:`), so you only see "No results found" when **every** connected node's YouTube source is blocked **and** SoundCloud has no match.
@@ -993,6 +1038,7 @@ When inviting the bot, make sure to give it these permissions:
 
 - [youtube-source: OAuth & poToken](https://github.com/lavalink-devs/youtube-source#using-a-potoken) — why a cloud VM needs OAuth
 - ["Video requires login on dedicated server" (issue #107)](https://github.com/lavalink-devs/youtube-source/issues/107) — the exact datacenter-IP problem
+- [yt-cipher](https://github.com/kikkia/yt-cipher) — remote cipher server for the `sig function` parsing error; public instance at `cipher.kikkia.dev`
 - [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) — browserless poToken generator (an alternative to OAuth)
 - [youtube-trusted-session-generator](https://github.com/iv-org/youtube-trusted-session-generator) — Chromium-based poToken/visitorData generator
 - [yt-dlp PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide) — background on Proof-of-Origin tokens
