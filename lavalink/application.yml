@@ -22,6 +22,12 @@ plugins:
     # one). Then the refreshToken is injected via env and persisted.
     oauth:
       enabled: true
+    # Remote cipher server: delegates YouTube player script parsing to an external service.
+    # Required because youtube-source's local parser breaks whenever YouTube rotates its
+    # player script (e.g. ac678d18). cipher.kikkia.dev is the maintainer-run public instance
+    # (10 req/s limit — fine for a personal bot). Self-host yt-cipher if you need more.
+    remoteCipher:
+      url: "https://cipher.kikkia.dev/"
     # Clients: TV is the ONLY OAuth-compatible one (it does the authenticated playback that
     # bypasses "requires login" on datacenter IPs). MUSIC/WEB/ANDROID_VR provide search,
     # playlist and mix (metadata) that TV lacks.
